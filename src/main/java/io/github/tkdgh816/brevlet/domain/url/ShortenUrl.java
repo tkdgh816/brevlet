@@ -1,19 +1,29 @@
 package io.github.tkdgh816.brevlet.domain.url;
 
-import io.github.tkdgh816.brevlet.domain.key.ShortenUrlKeyRule;
-
-import java.util.regex.Pattern;
+import java.time.Instant;
 
 public class ShortenUrl {
-    private String originalUrl;
-    private String shortenUrlKey;
+    private final String originalUrl;
+    private final String shortenUrlKey;
     private Long redirectCount;
+    private final Instant expiresAt;
 
-
-    public ShortenUrl(String originalUrl, String shortenUrlKey) {
+    public ShortenUrl(String originalUrl, String shortenUrlKey, Instant expiresAt) {
         this.originalUrl = originalUrl;
         this.shortenUrlKey = shortenUrlKey;
         this.redirectCount = 0L;
+        this.expiresAt = expiresAt;
+    }
+
+    private ShortenUrl(String originalUrl, String shortenUrlKey, Long redirectCount, Instant expiresAt) {
+        this.originalUrl = originalUrl;
+        this.shortenUrlKey = shortenUrlKey;
+        this.redirectCount = redirectCount;
+        this.expiresAt = expiresAt;
+    }
+
+    public static ShortenUrl restore(String originalUrl, String shortenUrlKey, Long redirectCount, Instant expiresAt) {
+        return new ShortenUrl(originalUrl, shortenUrlKey, redirectCount, expiresAt);
     }
 
     public String getOriginalUrl() {
@@ -28,7 +38,15 @@ public class ShortenUrl {
         return redirectCount;
     }
 
+    public Instant getExpiresAt() {
+        return expiresAt;
+    }
+
     public void increaseRedirectCount() {
         redirectCount++;
+    }
+
+    public boolean isAvailable(Instant now) {
+        return expiresAt == null || expiresAt.isAfter(now);
     }
 }

@@ -6,4 +6,6 @@ public interface ShortenUrlRepository {
     void save(ShortenUrl shortenUrl);
 
     Optional<ShortenUrl> findByKey(String shortenUrlKey);
+
+    void increaseRedirectCount(String shortenUrlKey);
 }
