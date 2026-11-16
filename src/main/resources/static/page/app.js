@@ -6,6 +6,7 @@
   const KEY_LENGTH = 8;
   const KEY_RE = new RegExp(`^[${KEY_CHARS}]{${KEY_LENGTH}}$`);
   const URL_RE = /^https?:\/\/(?:[\w-]+(?:\.[\w-]+)*\.[a-zA-Z]{2,}|localhost|(?:\d{1,3}\.){3}\d{1,3})(?::\d{1,5})?(?:[/?#]\S*)?$/;
+  const MAX_URL_LENGTH = 2048; // CreateShortenUrlRequest.originalUrl @Size(max = 2048)
   // 만료 기간은 선택 사항이며 기본값은 영구(null). 값을 고르면 해당 일수 후 만료된다.
   const MIN_DAYS = 1;
   const MAX_DAYS = 365;
@@ -241,6 +242,12 @@
     const raw = urlInput.value;
     if (!raw.trim()) { showUrlError('단축할 URL을 입력해 주세요.'); urlInput.focus(); return; }
     const url = normalizeUrl(raw);
+    // 자동으로 붙인 https://까지 포함한 실제 전송 길이로 검사한다
+    if (url.length > MAX_URL_LENGTH) {
+      showUrlError(`URL이 너무 길어요. ${numFmt.format(MAX_URL_LENGTH)}자 이하로 입력해 주세요. (현재 ${numFmt.format(url.length)}자)`);
+      urlInput.focus();
+      return;
+    }
     if (!URL_RE.test(url)) {
       showUrlError('올바른 URL 형식이 아니에요. http:// 또는 https://로 시작하는 주소를 입력해 주세요.');
       urlInput.focus();
@@ -248,6 +255,7 @@
     }
     const { valid, days } = currentExpiry();
     if (!valid) { customInput.focus(); toast(`만료 기간은 ${MIN_DAYS}~${MAX_DAYS}일 사이로 입력해 주세요.`, true); return; }
+    showUrlError('');
 
     const btn = $('#createBtn');
     setLoading(btn, true);
