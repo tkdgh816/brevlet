@@ -19,7 +19,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.Optional;
 
-@Profile("prod")
+@Profile({"mysql", "h2"})
 @Repository
 public class DatabaseShortenUrlRepository implements ShortenUrlRepository {
     private final NamedParameterJdbcTemplate jdbcTemplate;
