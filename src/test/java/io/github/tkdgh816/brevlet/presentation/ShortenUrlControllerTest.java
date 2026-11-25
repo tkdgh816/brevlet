@@ -18,6 +18,7 @@ import org.springframework.test.web.servlet.ResultActions;
 
 import java.time.Instant;
 
+import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.never;
@@ -25,6 +26,7 @@ import static org.mockito.Mockito.verify;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -134,8 +136,10 @@ class ShortenUrlControllerTest {
     void redirect_unknownKey_returns404() throws Exception {
         given(service.getOriginalUrlByKey(KEY)).willThrow(new ShortenUrlNotFoundException("not found"));
 
-        mockMvc.perform(get("/" + KEY))
-                .andExpect(status().isNotFound());
+        mockMvc.perform(get("/" + KEY).accept(MediaType.TEXT_HTML))
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_HTML))
+                .andExpect(content().string(containsString("404 Not Found")));
     }
 
     @Test
@@ -155,7 +159,9 @@ class ShortenUrlControllerTest {
     void getInfo_unknownKey_returns404() throws Exception {
         given(service.getShortenUrlInfoByKey(KEY)).willThrow(new ShortenUrlNotFoundException("not found"));
 
-        mockMvc.perform(get("/shorten-url/" + KEY))
-                .andExpect(status().isNotFound());
+        mockMvc.perform(get("/shorten-url/" + KEY).accept(MediaType.APPLICATION_JSON, MediaType.TEXT_PLAIN))
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_PLAIN))
+                .andExpect(content().string("not found"));
     }
 }

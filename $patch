@@ -1,0 +1,2147 @@
+diff --git a/.gitignore b/.gitignore
+index c2065bc..325af5e 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -35,3 +35,6 @@ out/
+ 
+ ### VS Code ###
+ .vscode/
++
++### AI Agents ##
++.claude/
+\ No newline at end of file
+diff --git a/README.md b/README.md
+index c40713a..01a974a 100644
+--- a/README.md
++++ b/README.md
+@@ -23,8 +23,8 @@ URL 단축 서비스 학습 프로젝트를 바탕으로 **만료 기간 설정
+ |---|---|
+ | 언어 | Java 21 |
+ | 프레임워크 | Spring Boot 4.1.2, Spring MVC, Bean Validation |
+-| 데이터 접근 | Spring JDBC, `NamedParameterJdbcTemplate` |
+-| 데이터베이스 | MySQL |
++| 데이터 접근 | Spring Data JPA, Hibernate |
++| 데이터베이스 | H2(기본), MySQL |
+ | 웹 화면 | HTML, CSS, JavaScript |
+ | 테스트 | JUnit Jupiter, AssertJ, Mockito, MockMvc |
+ | 빌드 | Gradle Wrapper 9.8.2 |
+@@ -52,11 +52,11 @@ flowchart LR
+    end
+ 
+    subgraph Infrastructure["Infrastructure 계층"]
+-      RepoImpl["DatabaseShortenUrlRepository<br/>Spring JDBC로 데이터 접근"]
++      RepoImpl["DatabaseShortenUrlRepository<br/>JPA로 생성 · 조회 · 횟수 증가"]
+       KeyImpl["RandomShortenUrlKeyGenerator<br/>랜덤 키 생성"]
+    end
+ 
+-   DB[("MySQL<br/>shorten_urls")]
++   DB[("H2 또는 MySQL<br/>shorten_urls")]
+ 
+    User -->|"HTTP 요청"| Controller
+    Controller -->|"기능 실행 요청"| Service
+@@ -116,49 +116,43 @@ public boolean isAvailable(Instant now) {
+ 조회: DATETIME(6) → LocalDateTime → UTC로 해석한 Instant
+ ```
+ 
+-변환은 DB 저장소 안에 모았습니다. `DATETIME(6)`은 소수점 아래 초를 여섯 자리까지 저장하므로, 나노초를 표현할 수 있는 `Instant`와 정밀도가 다를 수 있습니다.
++변환은 `ShortenUrlEntity.from()`과 `toDomain()`에서 수행합니다. `DATETIME(6)`은 소수점 아래 초를 여섯 자리까지 저장하므로, 나노초를 표현할 수 있는 `Instant`와 정밀도가 다를 수 있습니다.
+ 
+ ### 키 충돌 처리
+ 
+ 단축 키는 헷갈리기 쉬운 문자 `0`, `1`, `I`, `O`, `l`, `o`를 제외한 56개 문자에서 8자리를 무작위로 뽑아 생성합니다. 키는 대소문자를 구분합니다.
+ 
+-중복 여부를 먼저 조회하는 대신 저장을 시도합니다. DB 기본 키 제약에 걸리면 저장소가 `DuplicateKeyException`을 `ShortenUrlKeyConflictException`으로 변환하고, 서비스가 새 키를 생성해 재시도합니다. 인메모리 저장소도 `putIfAbsent`로 중복 저장을 거부합니다.
++JPA 저장소의 `create()`는 `persist()`와 `flush()`로 새 행 삽입을 시도합니다. 기본 키가 중복되면 저장소가 `ShortenUrlKeyConflictException`을 던집니다. 해당 시도가 롤백된 뒤 서비스는 새 키로 재시도합니다. 인메모리 저장소도 `putIfAbsent`로 중복 저장을 거부합니다.
+ 
+ 현재는 만료된 행도 유지하므로 만료된 키가 다시 생성되어도 충돌로 처리합니다.
+ 
+ ### 리다이렉트 횟수 갱신
+ 
+-DB에서는 조회한 객체의 값을 증가시켜 전체 저장하는 대신, 다음 SQL로 카운터만 증가시킵니다. 동시에 여러 요청이 들어올 때 조회한 과거 값으로 서로의 증가분을 덮어쓰는 문제를 피하기 위한 방식입니다.
+-
+-```sql
+-UPDATE shorten_urls
+-SET redirect_count = redirect_count + 1
+-WHERE shorten_url_key = :shortenUrlKey;
+-```
++JPA Criteria로 `redirect_count = redirect_count + 1`에 해당하는 UPDATE를 구성합니다. DB가 해당 행의 현재 값에 1을 더하므로 같은 링크에 동시에 접속해도 각 요청의 증가분이 반영됩니다.
+ 
+ ## 실행 방법
+ 
+ 아래 명령은 프로젝트 루트에서 실행하는 Windows PowerShell 기준입니다. JDK 21이 필요하며, Gradle은 포함된 Wrapper를 사용합니다.
+ 
+-### DB 없이 실행
++### H2로 실행 (기본)
+ 
+-화면과 기본 동작을 빠르게 확인하려면 인메모리 저장소를 사용하는 `test` 프로필로 실행합니다.
++외부 DB 설치 없이 JPA 저장소를 사용하려면 프로젝트 루트에서 실행합니다. 기본 프로필 `h2`는 시작할 때 `schema-h2.sql`로 메모리 DB를 준비합니다.
+ 
+ ```powershell
+-.\gradlew.bat bootRun --args="--spring.profiles.active=test"
++.\gradlew.bat bootRun
+ ```
+ 
+ 실행 후 [http://localhost:8080](http://localhost:8080)에 접속합니다. 이 프로필에서는 애플리케이션을 종료하면 링크 데이터가 사라집니다.
+ 
+ ### MySQL을 사용해 실행
+ 
+-기본 활성 프로필은 `prod`입니다. 저장소에 있는 기본 연결 설정은 다음과 같습니다.
++`mysql` 프로필의 연결 설정은 다음과 같습니다.
+ 
+ | 설정 | 값 |
+ |---|---|
+ | DB 주소 | `localhost:3308` |
+ | 데이터베이스 | `shorten_url_management` |
+-| 사용자 | `DB_USERNAME` 환경 변수, 없으면 `root` |
++| 사용자 | `DB_USERNAME` 환경 변수 |
+ | 비밀번호 | `DB_PASSWORD` 환경 변수 |
+ 
+ 1. MySQL에서 데이터베이스를 생성합니다.
+@@ -186,7 +180,7 @@ WHERE shorten_url_key = :shortenUrlKey;
+    ```powershell
+    $env:DB_USERNAME = "root"
+    $env:DB_PASSWORD = "실제 DB 비밀번호"
+-   .\gradlew.bat bootRun
++   .\gradlew.bat bootRun --args="--spring.profiles.active=mysql"
+    ```
+ 
+ DB 주소가 다르면 실행 전에 `SPRING_DATASOURCE_URL` 환경 변수로 덮어쓸 수 있습니다.
+@@ -197,10 +191,10 @@ $env:SPRING_DATASOURCE_URL = "jdbc:mysql://localhost:3306/shorten_url_management
+ 
+ ### 테스트 실행
+ 
+-전체 테스트의 애플리케이션 컨텍스트가 인메모리 저장소를 사용하도록 `test` 프로필을 지정합니다.
++H2를 사용해 전체 테스트를 실행합니다.
+ 
+ ```powershell
+-$env:SPRING_PROFILES_ACTIVE = "test"
++$env:SPRING_PROFILES_ACTIVE = "h2"
+ .\gradlew.bat test
+ ```
+ 
+@@ -210,8 +204,9 @@ $env:SPRING_PROFILES_ACTIVE = "test"
+ - 서비스: 만료 시각 계산, 시간 경과, 횟수 증가, 만료 링크 차단과 정보 조회, 키 충돌 재시도 및 실패
+ - 컨트롤러: 만료 기간 검증, UTC 시각 직렬화, 생성·리다이렉트·조회와 오류 상태 코드
+ - 애플리케이션: Spring 컨텍스트 로딩
++- H2 통합 테스트에서 중복 키 거부와 기존 링크 보존, UTC 만료 시각 왕복, 없는 키 처리, 동시 리다이렉트 20건의 응답과 최종 횟수를 확인합니다.
+ 
+-도메인·서비스 테스트는 인메모리 저장소를 사용하고, 컨트롤러 테스트는 서비스를 모킹합니다. 이 테스트들로 실제 MySQL의 저장·조회나 동시 요청 동작까지 검증하는 것은 아닙니다.
++서비스 단위 테스트는 인메모리 저장소를 사용하고, 컨트롤러 단위 테스트는 서비스를 모킹합니다. 실제 DB 저장소를 사용하는 통합 테스트의 실행 환경은 H2입니다.
+ 
+ ## API
+ 
+@@ -290,6 +285,8 @@ Location: https://example.com/articles/long-address
+ 
+ ## 학습 기록
+ 
++Spring JDBC에서 JPA로 전환하면서 기존 링크를 보존하는 생성 방식, 키 충돌 재시도의 트랜잭션 경계, 동시 접속 시 조회 수 갱신 방식을 검토했습니다. 대안과 적용 코드, H2 검증 결과는 [JPA 전환 기록](https://github.com/tkdgh816/brevlet/wiki/JPA-전환-기록)에 정리했습니다.
++
+ [프로젝트 Wiki](https://github.com/tkdgh816/brevlet/wiki)에 시간 타입과 `Clock`, DB 시각 매핑, 응답 코드와 예외, 키 설계와 확장에 대한 학습 내용을 정리했습니다.
+ 
+ 위키에는 적용한 내용뿐 아니라 검토한 설계와 후속 아이디어도 포함되어 있습니다. 현재 구현에는 삭제 API, 소프트 삭제, 만료 데이터 정리 스케줄러가 없으며, 만료 기간의 기본값은 30일이 아닌 **만료 없음**입니다. 현재 동작은 이 README와 소스 코드를 기준으로 확인할 수 있습니다.
+diff --git a/build.gradle b/build.gradle
+index 53c864c..cc805b7 100644
+--- a/build.gradle
++++ b/build.gradle
+@@ -21,7 +21,11 @@ dependencies {
+ 	implementation 'org.springframework.boot:spring-boot-starter-validation'
+ 	implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+ 	implementation 'org.springframework.boot:spring-boot-starter-jdbc'
++	implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
++
+ 	runtimeOnly 'com.mysql:mysql-connector-j'
++	runtimeOnly 'com.h2database:h2'
++
+ 	testImplementation 'org.springframework.boot:spring-boot-starter-validation-test'
+ 	testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+ 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+diff --git a/src/main/java/io/github/tkdgh816/brevlet/application/ShortenUrlService.java b/src/main/java/io/github/tkdgh816/brevlet/application/ShortenUrlService.java
+index ef4a979..bd65536 100644
+--- a/src/main/java/io/github/tkdgh816/brevlet/application/ShortenUrlService.java
++++ b/src/main/java/io/github/tkdgh816/brevlet/application/ShortenUrlService.java
+@@ -10,6 +10,7 @@ import io.github.tkdgh816.brevlet.domain.url.ShortenUrlUnavailableException;
+ import io.github.tkdgh816.brevlet.dto.url.CreateShortenUrlRequest;
+ import io.github.tkdgh816.brevlet.dto.url.ShortenUrlResponse;
+ import org.springframework.stereotype.Service;
++import org.springframework.transaction.annotation.Transactional;
+ 
+ import java.time.Clock;
+ import java.time.Duration;
+@@ -44,7 +45,7 @@ public class ShortenUrlService {
+             try {
+                 // ShortenUrl 도메인 객체 생성 및 레포지토리 저장
+                 ShortenUrl shortenUrl = new ShortenUrl(request.originalUrl(), shortenUrlKey, expiresAt);
+-                shortenUrlRepository.save(shortenUrl);
++                shortenUrlRepository.create(shortenUrl);
+                 return ShortenUrlResponse.from(shortenUrl);
+             } catch (ShortenUrlKeyConflictException e) {
+                 // 새 키 생성 다시 시도
+@@ -54,6 +55,7 @@ public class ShortenUrlService {
+         throw new KeyGenerationFailedException("단축 URL을 만들 수 없습니다.");
+     }
+ 
++    @Transactional(readOnly = true)
+     public ShortenUrlResponse getShortenUrlInfoByKey(String shortenUrlKey) {
+         // 레포지토리에서 key에 해당하는 ShortenUrl 요청
+         ShortenUrl shortenUrl = getByKey(shortenUrlKey);
+@@ -62,6 +64,7 @@ public class ShortenUrlService {
+         return ShortenUrlResponse.from(shortenUrl);
+     }
+ 
++    @Transactional
+     public String getOriginalUrlByKey(String shortenUrlKey) {
+         // 레포지토리에서 key에 해당하는 ShortenUrl 요청
+         ShortenUrl shortenUrl = getByKey(shortenUrlKey);
+diff --git a/src/main/java/io/github/tkdgh816/brevlet/domain/url/ShortenUrlRepository.java b/src/main/java/io/github/tkdgh816/brevlet/domain/url/ShortenUrlRepository.java
+index 55c638d..eae4442 100644
+--- a/src/main/java/io/github/tkdgh816/brevlet/domain/url/ShortenUrlRepository.java
++++ b/src/main/java/io/github/tkdgh816/brevlet/domain/url/ShortenUrlRepository.java
+@@ -3,7 +3,7 @@ package io.github.tkdgh816.brevlet.domain.url;
+ import java.util.Optional;
+ 
+ public interface ShortenUrlRepository {
+-    void save(ShortenUrl shortenUrl);
++    void create(ShortenUrl shortenUrl);
+ 
+     Optional<ShortenUrl> findByKey(String shortenUrlKey);
+ 
+diff --git a/src/main/java/io/github/tkdgh816/brevlet/infrastructure/persistence/DatabaseShortenUrlRepository.java b/src/main/java/io/github/tkdgh816/brevlet/infrastructure/persistence/DatabaseShortenUrlRepository.java
+index bd719e5..2eea01d 100644
+--- a/src/main/java/io/github/tkdgh816/brevlet/infrastructure/persistence/DatabaseShortenUrlRepository.java
++++ b/src/main/java/io/github/tkdgh816/brevlet/infrastructure/persistence/DatabaseShortenUrlRepository.java
+@@ -1,105 +1,74 @@
+ package io.github.tkdgh816.brevlet.infrastructure.persistence;
+ 
++import io.github.tkdgh816.brevlet.domain.ItemNotFoundException;
+ import io.github.tkdgh816.brevlet.domain.key.ShortenUrlKeyConflictException;
+ import io.github.tkdgh816.brevlet.domain.url.ShortenUrl;
++import io.github.tkdgh816.brevlet.domain.url.ShortenUrlNotFoundException;
+ import io.github.tkdgh816.brevlet.domain.url.ShortenUrlRepository;
++import jakarta.persistence.EntityManager;
++import jakarta.persistence.PersistenceContext;
++import jakarta.persistence.PersistenceException;
++import org.hibernate.exception.ConstraintViolationException;
+ import org.jspecify.annotations.Nullable;
+ import org.springframework.context.annotation.Profile;
+ import org.springframework.dao.DuplicateKeyException;
+ import org.springframework.dao.EmptyResultDataAccessException;
++import org.springframework.data.jpa.criteria.Expressions;
+ import org.springframework.jdbc.core.RowMapper;
+ import org.springframework.jdbc.core.namedparam.BeanPropertySqlParameterSource;
+ import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+ import org.springframework.jdbc.core.namedparam.SqlParameterSource;
+ import org.springframework.stereotype.Repository;
++import org.springframework.transaction.annotation.Transactional;
+ 
+ import java.time.Instant;
+ import java.time.LocalDateTime;
+ import java.time.ZoneOffset;
+ import java.util.Optional;
+ 
+-@Profile("prod")
++@Profile({"mysql", "h2"})
+ @Repository
+ public class DatabaseShortenUrlRepository implements ShortenUrlRepository {
+-    private final NamedParameterJdbcTemplate jdbcTemplate;
++    private final JpaShortenUrlRepository jpaShortenUrlRepository;
+ 
+-    public DatabaseShortenUrlRepository(NamedParameterJdbcTemplate jdbcTemplate) {
+-        this.jdbcTemplate = jdbcTemplate;
++    @PersistenceContext
++    private EntityManager entityManager;
++
++    public DatabaseShortenUrlRepository(JpaShortenUrlRepository jpaShortenUrlRepository) {
++        this.jpaShortenUrlRepository = jpaShortenUrlRepository;
+     }
+ 
+     @Override
+-    public void save(ShortenUrl shortenUrl) {
++    @Transactional
++    public void create(ShortenUrl shortenUrl) {
+         try {
+-            jdbcTemplate.update("""
+-                            INSERT INTO shorten_urls
+-                                (shorten_url_key, original_url, redirect_count, expires_at)
+-                            VALUES
+-                                (:shortenUrlKey, :originalUrl, :redirectCount, :expiresAt)
+-                            """,
+-                    getSqlParameterSource(shortenUrl)
+-            );
+-        } catch (DuplicateKeyException e) {
+-            throw new ShortenUrlKeyConflictException("이미 존재하는 단축 URL 키입니다.");
++            entityManager.persist(ShortenUrlEntity.from(shortenUrl));
++            entityManager.flush();
++        } catch (ConstraintViolationException ex) {
++            if (ex.getKind() == ConstraintViolationException.ConstraintKind.UNIQUE) {
++                throw new ShortenUrlKeyConflictException("이미 존재하는 단축 URL 키입니다.");
++            }
++            throw ex;
+         }
+     }
+ 
+     @Override
+     public Optional<ShortenUrl> findByKey(String shortenUrlKey) {
+-        try {
+-            ShortenUrl shortenUrl = jdbcTemplate.queryForObject("""
+-                            SELECT * FROM shorten_urls
+-                            WHERE shorten_url_key = :shortenUrlKey
+-                            """,
+-                    new MapSqlParameterSource("shortenUrlKey", shortenUrlKey),
+-                    ROW_MAPPER
+-            );
+-            return Optional.of(shortenUrl);
+-        } catch (EmptyResultDataAccessException e) {
+-            return Optional.empty();
+-        }
++        return jpaShortenUrlRepository.findById(shortenUrlKey)
++                .map(ShortenUrlEntity::toDomain);
+     }
+ 
+     @Override
+     public void increaseRedirectCount(String shortenUrlKey) {
+-        jdbcTemplate.update("""
+-                        UPDATE shorten_urls
+-                        SET redirect_count = redirect_count + 1
+-                        WHERE shorten_url_key = :shortenUrlKey
+-                        """,
+-                new MapSqlParameterSource("shortenUrlKey", shortenUrlKey)
+-        );
+-    }
+-
+-    private static SqlParameterSource getSqlParameterSource(ShortenUrl shortenUrl) {
+-        return new BeanPropertySqlParameterSource(shortenUrl) {
+-            @Override
+-            public @Nullable Object getValue(String paramName) throws IllegalArgumentException {
+-                Object value = super.getValue(paramName);
+-                return value instanceof Instant instant ? toLocalDateTime(instant) : value;
+-            }
+-        };
+-    }
+-
+-
+-    private static final RowMapper<ShortenUrl> ROW_MAPPER = (rs, rowNum) -> {
+-        String shortenUrlKey = rs.getString("shorten_url_key");
+-        String originalUrl = rs.getString("original_url");
+-        Long redirectCount = rs.getLong("redirect_count");
+-        Instant expiresAt = toInstant(rs.getObject("expires_at", LocalDateTime.class));
+-
+-        return ShortenUrl.restore(originalUrl, shortenUrlKey, redirectCount, expiresAt);
+-    };
+-
+-    private static LocalDateTime toLocalDateTime(Instant instant) {
+-        return instant == null
+-                ? null
+-                : LocalDateTime.ofInstant(instant, ZoneOffset.UTC);
+-    }
+-
+-    private static Instant toInstant(LocalDateTime time) {
+-        return time == null
+-                ? null
+-                : time.toInstant(ZoneOffset.UTC);
++        long updatedRows = jpaShortenUrlRepository.update((root, update, builder) -> {
++            var key = Expressions.path(root, ShortenUrlEntity::getShortenUrlKey);
++            var count = Expressions.path(root, ShortenUrlEntity::getRedirectCount);
++            update.set(count, builder.sum(count, 1L));
++            return builder.equal(key, shortenUrlKey);
++        });
++        if (updatedRows == 0) {
++            throw new ShortenUrlNotFoundException("단축 URL(%s)를 찾을 수 없습니다.".formatted(shortenUrlKey));
++        }
+     }
+ }
+diff --git a/src/main/java/io/github/tkdgh816/brevlet/infrastructure/persistence/InMemoryShortenUrlRepository.java b/src/main/java/io/github/tkdgh816/brevlet/infrastructure/persistence/InMemoryShortenUrlRepository.java
+index 9fd0cbc..6c18da9 100644
+--- a/src/main/java/io/github/tkdgh816/brevlet/infrastructure/persistence/InMemoryShortenUrlRepository.java
++++ b/src/main/java/io/github/tkdgh816/brevlet/infrastructure/persistence/InMemoryShortenUrlRepository.java
+@@ -16,7 +16,7 @@ public class InMemoryShortenUrlRepository implements ShortenUrlRepository {
+     Map<String, ShortenUrl> shortenUrls = new ConcurrentHashMap<>();
+ 
+     @Override
+-    public void save(ShortenUrl shortenUrl) {
++    public void create(ShortenUrl shortenUrl) {
+         ShortenUrl existing = shortenUrls.putIfAbsent(shortenUrl.getShortenUrlKey(), shortenUrl);
+         if (existing != null) {
+             throw new ShortenUrlKeyConflictException("이미 존재하는 단축 URL 키입니다.");
+@@ -30,9 +30,12 @@ public class InMemoryShortenUrlRepository implements ShortenUrlRepository {
+ 
+     @Override
+     public void increaseRedirectCount(String shortenUrlKey) {
+-        ShortenUrl shortenUrl = shortenUrls.get(shortenUrlKey);
+-        if (shortenUrl != null) {
+-            shortenUrl.increaseRedirectCount();
+-        }
++        shortenUrls.computeIfPresent(shortenUrlKey, (key, current) ->
++                ShortenUrl.restore(
++                        current.getOriginalUrl(),
++                        key,
++                        current.getRedirectCount() + 1,
++                        current.getExpiresAt()
++                ));
+     }
+ }
+diff --git a/src/main/java/io/github/tkdgh816/brevlet/infrastructure/persistence/JpaShortenUrlRepository.java b/src/main/java/io/github/tkdgh816/brevlet/infrastructure/persistence/JpaShortenUrlRepository.java
+new file mode 100644
+index 0000000..d040500
+--- /dev/null
++++ b/src/main/java/io/github/tkdgh816/brevlet/infrastructure/persistence/JpaShortenUrlRepository.java
+@@ -0,0 +1,8 @@
++package io.github.tkdgh816.brevlet.infrastructure.persistence;
++
++import org.springframework.data.jpa.repository.JpaRepository;
++import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
++
++interface JpaShortenUrlRepository extends JpaRepository<ShortenUrlEntity, String>, JpaSpecificationExecutor<ShortenUrlEntity> {
++
++}
+diff --git a/src/main/java/io/github/tkdgh816/brevlet/infrastructure/persistence/ShortenUrlEntity.java b/src/main/java/io/github/tkdgh816/brevlet/infrastructure/persistence/ShortenUrlEntity.java
+new file mode 100644
+index 0000000..77bfedd
+--- /dev/null
++++ b/src/main/java/io/github/tkdgh816/brevlet/infrastructure/persistence/ShortenUrlEntity.java
+@@ -0,0 +1,72 @@
++package io.github.tkdgh816.brevlet.infrastructure.persistence;
++
++import io.github.tkdgh816.brevlet.domain.key.ShortenUrlKeyRule;
++import io.github.tkdgh816.brevlet.domain.url.ShortenUrl;
++import jakarta.persistence.*;
++import org.hibernate.annotations.JdbcTypeCode;
++import org.hibernate.type.SqlTypes;
++
++import java.time.Instant;
++import java.time.LocalDateTime;
++import java.time.ZoneOffset;
++
++@Entity
++@Table(name = "shorten_urls",
++        indexes = @Index(name = "idx_shorten_url_expires_at", columnList = "expires_at"))
++class ShortenUrlEntity {
++    @Id
++    @JdbcTypeCode(SqlTypes.CHAR)
++    @Column(name = "shorten_url_key", length = ShortenUrlKeyRule.KEY_LENGTH, nullable = false, updatable = false)
++    private String shortenUrlKey;
++
++    @Column(name = "original_url", length = 2048, nullable = false)
++    private String originalUrl;
++
++    @Column(name = "redirect_count", nullable = false)
++    private Long redirectCount;
++
++    @Column(name = "expires_at", secondPrecision = 6)
++    private LocalDateTime expiresAt;
++
++    protected ShortenUrlEntity() {
++
++    }
++
++    public String getShortenUrlKey() {
++        return shortenUrlKey;
++    }
++
++    public Long getRedirectCount() {
++        return redirectCount;
++    }
++
++    static ShortenUrlEntity from(ShortenUrl shortenUrl){
++        ShortenUrlEntity entity = new ShortenUrlEntity();
++        entity.originalUrl = shortenUrl.getOriginalUrl();
++        entity.shortenUrlKey = shortenUrl.getShortenUrlKey();
++        entity.redirectCount = shortenUrl.getRedirectCount();
++        entity.expiresAt = toLocalDateTime(shortenUrl.getExpiresAt());
++        return entity;
++    }
++
++    ShortenUrl toDomain(){
++        return ShortenUrl.restore(
++                this.originalUrl,
++                this.shortenUrlKey,
++                this.redirectCount,
++                toInstant(this.expiresAt)
++        );
++    }
++
++    private static LocalDateTime toLocalDateTime(Instant instant) {
++        return instant == null
++                ? null
++                : LocalDateTime.ofInstant(instant, ZoneOffset.UTC);
++    }
++
++    private static Instant toInstant(LocalDateTime time) {
++        return time == null
++                ? null
++                : time.toInstant(ZoneOffset.UTC);
++    }
++}
+diff --git a/src/main/java/io/github/tkdgh816/brevlet/presentation/ShortenUrlController.java b/src/main/java/io/github/tkdgh816/brevlet/presentation/ShortenUrlController.java
+index eac5a86..f822105 100644
+--- a/src/main/java/io/github/tkdgh816/brevlet/presentation/ShortenUrlController.java
++++ b/src/main/java/io/github/tkdgh816/brevlet/presentation/ShortenUrlController.java
+@@ -9,6 +9,7 @@ import jakarta.validation.constraints.Pattern;
+ import org.springframework.http.HttpStatus;
+ import org.springframework.http.ResponseEntity;
+ import org.springframework.web.bind.annotation.*;
++import org.springframework.web.servlet.ModelAndView;
+ 
+ import java.net.URI;
+ 
+@@ -20,6 +21,11 @@ public class ShortenUrlController {
+         this.shortenUrlService = shortenUrlService;
+     }
+ 
++    @GetMapping("/")
++    public ModelAndView home() {
++        return new ModelAndView("forward:/page/index.html");
++    }
++
+     @PostMapping("/shorten-url")
+     public ResponseEntity<ShortenUrlResponse> createShortenUrl(@RequestBody @Valid CreateShortenUrlRequest request) {
+         ShortenUrlResponse response = shortenUrlService.generateShortenUrl(request);
+diff --git a/src/main/java/io/github/tkdgh816/brevlet/presentation/WebPageConfig.java b/src/main/java/io/github/tkdgh816/brevlet/presentation/WebPageConfig.java
+deleted file mode 100644
+index 990765a..0000000
+--- a/src/main/java/io/github/tkdgh816/brevlet/presentation/WebPageConfig.java
++++ /dev/null
+@@ -1,18 +0,0 @@
+-package io.github.tkdgh816.brevlet.presentation;
+-
+-import org.springframework.context.annotation.Configuration;
+-import org.springframework.web.servlet.config.annotation.ViewControllerRegistry;
+-import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+-
+-/**
+- * 프론트 페이지 진입점 설정.
+- * 단일 세그먼트 경로(/{shortenUrlKey})는 단축 URL 리디렉션이 사용하므로,
+- * 정적 페이지는 /page/ 아래에 두고 루트(/) 요청을 그쪽으로 포워딩한다.
+- */
+-@Configuration
+-public class WebPageConfig implements WebMvcConfigurer {
+-    @Override
+-    public void addViewControllers(ViewControllerRegistry registry) {
+-        registry.addViewController("/").setViewName("forward:/page/index.html");
+-    }
+-}
+diff --git a/src/main/resources/application-h2.yaml b/src/main/resources/application-h2.yaml
+new file mode 100644
+index 0000000..dafc883
+--- /dev/null
++++ b/src/main/resources/application-h2.yaml
+@@ -0,0 +1,9 @@
++spring:
++  datasource:
++    url: jdbc:h2:mem:brevlet
++    username: sa
++    password:
++  sql:
++    init:
++      mode: always
++      schema-locations: classpath:schema-h2.sql
+\ No newline at end of file
+diff --git a/src/main/resources/application-prod.yaml b/src/main/resources/application-mysql.yaml
+similarity index 82%
+rename from src/main/resources/application-prod.yaml
+rename to src/main/resources/application-mysql.yaml
+index 6748afc..09293bb 100644
+--- a/src/main/resources/application-prod.yaml
++++ b/src/main/resources/application-mysql.yaml
+@@ -2,5 +2,5 @@ spring:
+   datasource:
+     driver-class-name: com.mysql.cj.jdbc.Driver
+     url: jdbc:mysql://localhost:3308/shorten_url_management
+-    username: ${DB_USERNAME:root}
++    username: ${DB_USERNAME}
+     password: ${DB_PASSWORD}
+\ No newline at end of file
+diff --git a/src/main/resources/application.yaml b/src/main/resources/application.yaml
+index f7bcdfd..82ad3ea 100644
+--- a/src/main/resources/application.yaml
++++ b/src/main/resources/application.yaml
+@@ -2,4 +2,10 @@ spring:
+   application:
+     name: brevlet
+   profiles:
+-    active: prod
+\ No newline at end of file
++    default: h2
++  jpa:
++    hibernate:
++      ddl-auto: validate
++  sql:
++    init:
++      mode: never
+\ No newline at end of file
+diff --git a/src/main/resources/schema-h2.sql b/src/main/resources/schema-h2.sql
+new file mode 100644
+index 0000000..0354b10
+--- /dev/null
++++ b/src/main/resources/schema-h2.sql
+@@ -0,0 +1,10 @@
++CREATE TABLE shorten_urls
++(
++    shorten_url_key CHAR(8) PRIMARY KEY,
++    original_url    VARCHAR(2048) NOT NULL,
++    redirect_count  BIGINT        NOT NULL,
++    expires_at      TIMESTAMP(6)
++);
++
++CREATE INDEX idx_shorten_url_expires_at
++    ON shorten_urls (expires_at);
+\ No newline at end of file
+diff --git a/src/main/resources/static/page/app.css b/src/main/resources/static/page/app.css
+index bcd10ff..f7df5e0 100644
+--- a/src/main/resources/static/page/app.css
++++ b/src/main/resources/static/page/app.css
+@@ -1,311 +1,118 @@
+ :root {
+-  --bg: #f6f7fb;
+-  --surface: #ffffff;
+-  --surface-2: #f1f3f8;
+-  --border: #e3e6ee;
+-  --text: #121826;
+-  --text-2: #4b5468;
+-  --text-3: #8a93a6;
+-  --accent: #4f46e5;
+-  --accent-hover: #4338ca;
+-  --accent-soft: #eef0ff;
+-  --accent-text: #ffffff;
+-  --success: #0f9d63;
+-  --success-soft: #e5f7ef;
+-  --warn: #b26b00;
+-  --warn-soft: #fff4dc;
+-  --danger: #dc2f45;
+-  --danger-soft: #fdecee;
+-  --shadow: 0 1px 2px rgba(16, 24, 40, .04), 0 8px 24px rgba(16, 24, 40, .06);
+-  --radius: 16px;
+-  --radius-sm: 10px;
+-  color-scheme: light;
++    color-scheme: light;
++    --ink: #17191c;
++    --muted: #5b636b;
++    --blue: #426789;
++    --line: #ced3d7;
++    --paper: #f1efed;
++    font-family: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
++    color: var(--ink);
++    background: var(--paper);
+ }
+-
+-@media (prefers-color-scheme: dark) {
+-  :root:not([data-theme="light"]) {
+-    --bg: #0d1017;
+-    --surface: #151a24;
+-    --surface-2: #1c2230;
+-    --border: #2a3142;
+-    --text: #eef1f7;
+-    --text-2: #b4bccc;
+-    --text-3: #7c869a;
+-    --accent: #7c74ff;
+-    --accent-hover: #918aff;
+-    --accent-soft: #23234a;
+-    --success: #3ccf8e;
+-    --success-soft: #11301f;
+-    --warn: #f0b44c;
+-    --warn-soft: #33270f;
+-    --danger: #ff6b7d;
+-    --danger-soft: #3a161c;
+-    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .25);
+-    color-scheme: dark;
+-  }
+-}
+-
+-:root[data-theme="dark"] {
+-  --bg: #0d1017;
+-  --surface: #151a24;
+-  --surface-2: #1c2230;
+-  --border: #2a3142;
+-  --text: #eef1f7;
+-  --text-2: #b4bccc;
+-  --text-3: #7c869a;
+-  --accent: #7c74ff;
+-  --accent-hover: #918aff;
+-  --accent-soft: #23234a;
+-  --success: #3ccf8e;
+-  --success-soft: #11301f;
+-  --warn: #f0b44c;
+-  --warn-soft: #33270f;
+-  --danger: #ff6b7d;
+-  --danger-soft: #3a161c;
+-  --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .25);
+-  color-scheme: dark;
+-}
+-
+ *, *::before, *::after { box-sizing: border-box; }
+-
+-html { -webkit-text-size-adjust: 100%; }
+-
+-body {
+-  margin: 0;
+-  background: var(--bg);
+-  color: var(--text);
+-  font-family: "Pretendard", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Segoe UI", Roboto, sans-serif;
+-  font-size: 15px;
+-  line-height: 1.55;
+-  -webkit-font-smoothing: antialiased;
+-  min-height: 100vh;
+-  display: flex;
+-  flex-direction: column;
+-}
+-
+-svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+-
+-a { color: inherit; }
+-
+-button { font: inherit; color: inherit; cursor: pointer; }
+-
+ [hidden] { display: none !important; }
+-
+-.container { width: 100%; max-width: 760px; margin: 0 auto; padding: 0 16px; }
+-
+-/* Top bar */
+-.topbar {
+-  position: sticky; top: 0; z-index: 10;
+-  background: color-mix(in srgb, var(--bg) 85%, transparent);
+-  backdrop-filter: saturate(180%) blur(12px);
+-  border-bottom: 1px solid var(--border);
+-}
+-.topbar-inner { display: flex; align-items: center; justify-content: space-between; height: 60px; }
+-.brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 800; font-size: 18px; letter-spacing: -.02em; text-decoration: none; }
+-.brand-mark { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: var(--accent); color: #fff; }
+-.brand-mark svg { width: 18px; height: 18px; stroke-width: 2.4; }
+-
+-.icon-btn {
+-  display: grid; place-items: center; width: 38px; height: 38px;
+-  border-radius: 10px; border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+-  transition: background .15s, color .15s;
+-}
+-.icon-btn:hover { color: var(--text); background: var(--surface-2); }
+-.icon-btn .i-moon { display: none; }
+-:root[data-theme="dark"] .icon-btn .i-sun { display: none; }
+-:root[data-theme="dark"] .icon-btn .i-moon { display: block; }
+-@media (prefers-color-scheme: dark) {
+-  :root:not([data-theme="light"]) .icon-btn .i-sun { display: none; }
+-  :root:not([data-theme="light"]) .icon-btn .i-moon { display: block; }
+-}
+-
+-/* Hero */
+-.hero { text-align: center; padding: 56px 0 28px; }
+-.hero h1 { margin: 0 0 12px; font-size: clamp(28px, 6vw, 42px); line-height: 1.2; letter-spacing: -.035em; font-weight: 800; }
+-.accent { color: var(--accent); }
+-.lead { margin: 0 auto; max-width: 480px; color: var(--text-2); font-size: 16px; }
+-
+-/* Card */
+-.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+-.main-card { padding: 8px 24px 24px; }
+-
+-.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 0 -24px 22px; padding: 0 24px; }
+-.tab {
+-  position: relative; background: none; border: 0; padding: 14px 4px; margin-right: 18px;
+-  font-weight: 600; color: var(--text-3); transition: color .15s;
+-}
+-.tab:hover { color: var(--text-2); }
+-.tab.is-active { color: var(--text); }
+-.tab.is-active::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--accent); border-radius: 2px; }
+-
+-.field-label { display: block; font-size: 13px; font-weight: 600; color: var(--text-2); margin-bottom: 8px; }
+-
+-.input-row { display: flex; gap: 10px; }
+-.input-wrap { position: relative; flex: 1; min-width: 0; display: flex; align-items: center; }
+-.input-icon { position: absolute; left: 14px; color: var(--text-3); pointer-events: none; }
+-.input-wrap input {
+-  width: 100%; height: 52px; padding: 0 92px 0 44px;
+-  border: 1.5px solid var(--border); border-radius: 12px;
+-  background: var(--surface); color: var(--text); font: inherit; font-size: 16px;
+-  transition: border-color .15s, box-shadow .15s;
+-}
+-#lookupInput { padding-right: 16px; }
+-.input-wrap input::placeholder { color: var(--text-3); }
+-.input-wrap input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+-.input-wrap input[aria-invalid="true"] { border-color: var(--danger); box-shadow: 0 0 0 4px var(--danger-soft); }
+-.paste-btn {
+-  position: absolute; right: 8px; height: 34px; padding: 0 12px;
+-  border: 0; border-radius: 8px; background: var(--surface-2); color: var(--text-2);
+-  font-size: 13px; font-weight: 600;
+-}
+-.paste-btn:hover { color: var(--accent); }
+-
+-.field-error { min-height: 20px; margin: 6px 0 0; font-size: 13px; color: var(--danger); }
+-
+-/* Buttons */
+-.btn {
+-  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+-  height: 40px; padding: 0 16px; border-radius: 10px; border: 1px solid transparent;
+-  font-weight: 600; font-size: 14px; text-decoration: none; white-space: nowrap;
+-  transition: background .15s, border-color .15s, color .15s, transform .05s;
+-}
+-.btn:active { transform: translateY(1px); }
+-.btn:disabled { opacity: .6; cursor: not-allowed; }
+-.btn-lg { height: 52px; padding: 0 24px; font-size: 15px; border-radius: 12px; }
+-.btn-primary { background: var(--accent); color: var(--accent-text); }
+-.btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+-.btn-ghost { background: var(--surface); border-color: var(--border); color: var(--text); }
+-.btn-ghost:hover { background: var(--surface-2); }
+-.spinner { display: none; width: 18px; height: 18px; border: 2px solid rgba(255,255,255,.4); border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; }
+-.btn.is-loading .spinner { display: inline-block; }
+-.btn.is-loading .btn-label { display: none; }
+-@keyframes spin { to { transform: rotate(360deg); } }
+-
+-/* Expiry */
+-.expiry { margin-top: 6px; }
+-.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+-.chip {
+-  height: 36px; padding: 0 14px; border-radius: 999px;
+-  border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+-  font-size: 14px; font-weight: 500; transition: all .15s;
+-}
+-.chip:hover { border-color: var(--accent); color: var(--accent); }
+-.chip.is-active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 700; }
+-.custom-days { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: var(--text-2); font-size: 14px; }
+-.custom-days input {
+-  width: 110px; height: 38px; padding: 0 12px; border-radius: 10px;
+-  border: 1.5px solid var(--border); background: var(--surface); color: var(--text); font: inherit;
+-}
+-.custom-days input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+-.hint { margin: 10px 0 0; font-size: 13px; color: var(--text-3); }
+-.hint-inline { font-weight: 400; color: var(--text-3); }
+-
+-/* Result */
+-.result, .info {
+-  margin-top: 22px; padding: 20px; border-radius: 14px;
+-  background: var(--surface-2); border: 1px solid var(--border);
+-  animation: rise .25s ease-out;
+-}
+-@keyframes rise { from { opacity: 0; transform: translateY(6px); } }
+-.result-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+-.result-exp { font-size: 13px; color: var(--text-2); }
+-.short-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+-.short-url {
+-  flex: 1; min-width: 0; font-size: 22px; font-weight: 700; letter-spacing: -.01em;
+-  color: var(--accent); text-decoration: none; overflow-wrap: anywhere;
+-}
+-.short-url:hover { text-decoration: underline; }
+-.short-actions { display: flex; gap: 8px; }
+-.short-actions .btn { height: 44px; }
+-.short-actions .btn-ghost { width: 44px; padding: 0; }
+-.result-origin { margin: 12px 0 0; font-size: 13px; color: var(--text-3); overflow-wrap: anywhere; }
+-.result-origin span { color: var(--text-2); }
+-
+-.badge { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+-.badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+-.badge-success { background: var(--success-soft); color: var(--success); }
+-.badge-warn { background: var(--warn-soft); color: var(--warn); }
+-.badge-danger { background: var(--danger-soft); color: var(--danger); }
+-
+-/* Info */
+-.info-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+-.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 16px 0; }
+-.stat { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+-.stat dt { font-size: 12px; color: var(--text-3); font-weight: 600; }
+-.stat dd { margin: 4px 0 0; font-size: 18px; font-weight: 700; letter-spacing: -.01em; }
+-.info-origin { margin-bottom: 16px; }
+-.info-origin .field-label { margin-bottom: 4px; }
+-.info-origin a { font-size: 14px; color: var(--text-2); overflow-wrap: anywhere; }
+-.info-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+-
+-/* Recent */
+-.recent { margin-top: 36px; }
+-.recent-head { display: flex; align-items: baseline; justify-content: space-between; }
+-.recent h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
+-.recent-note { margin: 2px 0 12px; font-size: 13px; color: var(--text-3); }
+-.text-btn { background: none; border: 0; padding: 4px; font-size: 13px; color: var(--text-3); }
+-.text-btn:hover { color: var(--danger); }
+-/* minmax(0, 1fr): 그리드 항목이 긴 내용(nowrap)에 맞춰 늘어나지 않도록 폭을 컨테이너에 고정 */
+-.recent-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+-.recent-item {
+-  display: flex; align-items: center; gap: 12px; padding: 14px 16px; min-width: 0;
+-  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+-}
+-.recent-main { flex: 1; min-width: 0; }
+-.recent-short { font-weight: 700; overflow-wrap: anywhere; color: var(--accent); text-decoration: none; }
+-.recent-short:hover { text-decoration: underline; }
+-.recent-origin { font-size: 13px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+-.recent-meta { display: flex; gap: 10px; align-items: center; margin-top: 4px; font-size: 12px; color: var(--text-3); flex-wrap: wrap; }
+-.recent-meta .badge { height: 22px; font-size: 11px; }
+-.recent-actions { display: flex; gap: 6px; }
+-.recent-actions .btn { height: 34px; padding: 0 10px; font-size: 13px; }
+-.recent-item.is-dead .recent-short { color: var(--text-3); text-decoration: line-through; }
+-
+-/* Features */
+-.features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 48px 0 24px; }
+-.feature { padding: 18px; }
+-.f-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); margin-bottom: 12px; }
+-.feature h3 { margin: 0 0 4px; font-size: 15px; }
+-.feature p { margin: 0; font-size: 13px; color: var(--text-2); }
+-
+-.footer { margin-top: auto; padding: 24px 0 32px; text-align: center; font-size: 13px; color: var(--text-3); }
+-
+-/* Toast */
+-.toast {
+-  position: fixed; left: 50%; bottom: 28px; z-index: 50;
+-  transform: translate(-50%, 20px); opacity: 0; pointer-events: none;
+-  max-width: calc(100% - 32px); padding: 12px 18px; border-radius: 12px;
+-  background: #121826; color: #fff; font-size: 14px; font-weight: 500;
+-  box-shadow: 0 10px 30px rgba(0,0,0,.2);
+-  transition: opacity .2s, transform .2s;
+-}
+-.toast.is-show { opacity: 1; transform: translate(-50%, 0); }
+-.toast.is-error { background: var(--danger); }
+-
+-/* Modal */
+-
+-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+-.input-wrap input:focus-visible { outline: none; }
+-
+-/* Mobile */
++body { margin: 0; }
++button, input, textarea { font: inherit; }
++button, a, summary, .periods label { -webkit-tap-highlight-color: transparent; }
++button, summary, .periods label { cursor: pointer; }
++a { color: inherit; text-decoration: none; }
++:focus-visible, .periods input:focus-visible + span {
++    outline: 3px solid #3776a9;
++    outline-offset: 3px;
++}
++.shell { width: min(960px, calc(100% - 48px)); margin: 0 auto; padding: 42px 0 64px; }
++.masthead { text-align: center; margin-bottom: 24px; }
++.masthead h1 {
++    font: 800 clamp(3rem, 6vw, 4.75rem)/1.04 Arial, sans-serif;
++    letter-spacing: -.065em;
++    margin: 0;
++    color: #111214;
++}
++nav { display: inline-flex; gap: 10px; margin-top: 18px; }
++nav a { padding: 8px 18px; border-bottom: 3px solid transparent; font-weight: 700; color: var(--muted); }
++nav a[aria-current] { border-color: var(--blue); color: var(--ink); }
++.panel { display: grid; gap: 18px; }
++.card {
++    min-width: 0;
++    padding: clamp(19px, 2.6vw, 30px);
++    border-radius: 20px;
++    background: #fff;
++    box-shadow: 0 2px 4px #211d1910, 0 8px 22px -10px #27232040;
++}
++.field-label, .result h2 { display: block; margin: 0 0 14px; font-size: 1.18rem; font-weight: 750; }
++.input-row, .result-row { display: flex; align-items: center; gap: 12px; }
++.input-row input, textarea {
++    min-width: 0;
++    padding: 12px 15px;
++    background: white;
++    color: var(--ink);
++    border: 1px solid #b9c1c9;
++    border-radius: 10px;
++}
++.input-row input { flex: 1; min-height: 54px; font-size: clamp(1rem, 2vw, 1.35rem); }
++input::placeholder { color: #707982; }
++.primary, .action, .periods span {
++    display: inline-flex;
++    justify-content: center;
++    align-items: center;
++    border-radius: 10px;
++    font-weight: 650;
++    white-space: nowrap;
++}
++.primary { min-height: 54px; padding: 0 26px; border: 0; color: white; background: var(--blue); font-size: 1.05rem; }
++.primary:hover { background: #315472; }
++.primary:disabled { cursor: progress; opacity: .7; }
++.periods { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; border: 0; margin: 17px 0 0; padding: 0; }
++.periods legend { float: left; padding: 6px 8px 6px 0; font-size: .94rem; font-weight: 700; }
++.periods label { position: relative; }
++.periods input { position: absolute; width: 1px; height: 1px; opacity: 0; }
++.periods span { padding: 5px 13px; min-height: 34px; font-size: .92rem; border: 1px solid var(--line); color: var(--muted); }
++.periods input:checked + span { background: var(--blue); color: white; border-color: var(--blue); }
++.periods input:checked + span::before { content: "✓"; margin-right: 5px; }
++#raw-editor { margin-top: 19px; padding-top: 14px; border-top: 1px solid #e1e3e5; }
++summary { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-weight: 650; list-style: none; }
++summary::-webkit-details-marker { display: none; }
++summary::after { content: ""; width: 9px; height: 9px; margin-right: 4px; border: solid var(--muted); border-width: 0 2px 2px 0; transform: translateY(-2px) rotate(45deg); }
++details[open] > summary::after { transform: translateY(2px) rotate(225deg); }
++.hint { display: block; color: var(--muted); font-size: .9rem; line-height: 1.6; margin: 15px 0 0; }
++textarea, pre { font-family: ui-monospace, Consolas, monospace; font-size: .9rem; line-height: 1.5; }
++textarea { display: block; width: 100%; margin-top: 8px; resize: vertical; }
++.result-row { flex-wrap: wrap; }
++.short-address { min-width: 0; overflow-wrap: anywhere; font-size: clamp(1.45rem, 3.4vw, 2.5rem); line-height: 1.15; letter-spacing: -.04em; }
++.action { gap: 6px; min-height: 36px; padding: 6px 12px; border: 1px solid var(--line); font-size: .9rem; background: white; color: #3b4650; }
++.action:hover { background: #f1f4f6; }
++.copy::before { content: ""; width: 10px; height: 12px; margin-right: 3px; border: 1.5px solid currentColor; border-radius: 2px; box-shadow: 2px 2px white, 3px 3px currentColor; }
++.open-link { background: #eaf0f5; color: #324f6b; border-color: transparent; }
++.open-link:hover { background: #dce7ef; }
++.open-link b { font-size: 1.2em; line-height: 1; }
++.result-row .open-link { margin-left: auto; }
++.expiry { color: var(--muted); }
++p.expiry { margin: 12px 0 0; font-size: .94rem; }
++.info { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 12px 24px; margin: 18px 0 22px; }
++.info dt { color: var(--muted); }
++.info dd { margin: 0; overflow-wrap: anywhere; }
++.trace { padding-block: 17px; }
++.exchange h3 { font-size: .93rem; margin: 18px 0 6px; }
++pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f6f7; padding: 12px; border-radius: 8px; margin: 0; }
++.notice { margin: 0; padding-inline: 4px; color: var(--muted); }
++.notice:empty { display: none; }
++.notice.error { color: #8b362c; }
++.expired-page { max-width: 650px; }
++.expired-card { text-align: center; padding: 42px 22px; }
++.http-code { color: var(--blue); font-weight: 750; margin: 0; }
++.expired-card h2 { font-size: clamp(1.6rem, 4vw, 2rem); margin: 12px 0; }
++.expired-card p:not(.http-code) { color: var(--muted); }
++.expired-card .primary { margin-top: 10px; min-height: 44px; }
+ @media (max-width: 600px) {
+-  .hero { padding: 36px 0 20px; }
+-  .main-card { padding: 4px 16px 18px; }
+-  .tabs { margin: 0 -16px 18px; padding: 0 16px; }
+-  .input-row { flex-direction: column; }
+-  .btn-lg { width: 100%; }
+-  .short-url { font-size: 19px; }
+-  .short-row { flex-direction: column; align-items: stretch; }
+-  .short-actions .btn-primary { flex: 1; }
+-  .stats { grid-template-columns: 1fr 1fr; }
+-  .stats .stat:first-child { grid-column: span 2; }
+-  .features { grid-template-columns: 1fr; gap: 0; margin-top: 32px; }
+-  .feature { display: grid; grid-template-columns: 40px 1fr; column-gap: 14px; padding: 12px 0; }
+-  .f-icon { grid-row: span 2; margin: 0; }
+-  .recent-item { flex-direction: column; align-items: stretch; }
+-  .recent-actions { justify-content: flex-end; }
+-}
+-
+-@media (prefers-reduced-motion: reduce) {
+-  *, *::before, *::after { animation: none !important; transition: none !important; }
++    .shell { width: calc(100% - 24px); padding-top: 28px; }
++    .masthead { margin-bottom: 18px; }
++    .panel { gap: 14px; }
++    .card { padding-inline: 16px; border-radius: 16px; }
++    .input-row { gap: 6px; }
++    .input-row input { padding-inline: 9px; }
++    .primary { padding-inline: 13px; }
++    .periods { gap: 5px; }
++    .periods span { padding-inline: 9px; }
++    .short-address { flex-basis: 100%; }
++    .result-row .open-link { margin-left: 0; }
+ }
+diff --git a/src/main/resources/static/page/app.js b/src/main/resources/static/page/app.js
+index f9b8d56..518e301 100644
+--- a/src/main/resources/static/page/app.js
++++ b/src/main/resources/static/page/app.js
+@@ -1,468 +1,147 @@
+-(() => {
+-  'use strict';
+-
+-  // ---- 서버 규칙과 동일하게 맞춘 상수 ----
+-  const KEY_CHARS = '23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz';
+-  const KEY_LENGTH = 8;
+-  const KEY_RE = new RegExp(`^[${KEY_CHARS}]{${KEY_LENGTH}}$`);
+-  const URL_RE = /^https?:\/\/(?:[\w-]+(?:\.[\w-]+)*\.[a-zA-Z]{2,}|localhost|(?:\d{1,3}\.){3}\d{1,3})(?::\d{1,5})?(?:[/?#]\S*)?$/;
+-  const MAX_URL_LENGTH = 2048; // CreateShortenUrlRequest.originalUrl @Size(max = 2048)
+-  // 만료 기간은 선택 사항이며 기본값은 영구(null). 값을 고르면 해당 일수 후 만료된다.
+-  const MIN_DAYS = 1;
+-  const MAX_DAYS = 365;
+-  const RECENT_KEY = 'brevlet.recent';
+-  const THEME_KEY = 'brevlet.theme';
+-  const RECENT_LIMIT = 20;
+-
+-  const $ = (sel) => document.querySelector(sel);
+-  // 단축 URL은 현재 페이지에 접속한 호스트(도메인 또는 IP:포트)를 기준으로 만든다
+-  const { protocol, host } = window.location;
+-  const shortUrlOf = (key) => `${protocol}//${host}/${key}`;
+-
+-  // ---- 공통 유틸 ----
+-  const storage = {
+-    get(key, fallback) {
+-      try { const v = localStorage.getItem(key); return v == null ? fallback : JSON.parse(v); }
+-      catch { return fallback; }
+-    },
+-    set(key, value) {
+-      try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* 저장 불가 환경 무시 */ }
+-    },
+-  };
+-
+-  const dateFmt = new Intl.DateTimeFormat('ko-KR', { year: 'numeric', month: 'long', day: 'numeric' });
+-  const dateTimeFmt = new Intl.DateTimeFormat('ko-KR', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+-  const numFmt = new Intl.NumberFormat('ko-KR');
+-
+-  function remainText(expiresAt) {
+-    if (expiresAt == null) return '만료 없음';
+-    const ms = new Date(expiresAt).getTime() - Date.now();
+-    if (ms <= 0) return '만료됨';
+-    if (ms >= 86400000) return `${Math.round(ms / 86400000)}일 남음`;
+-    const hours = Math.floor(ms / 3600000);
+-    if (hours >= 1) return `${hours}시간 남음`;
+-    return `${Math.max(1, Math.floor(ms / 60000))}분 남음`;
+-  }
+-
+-  function statusOf(info) {
+-    // expiresAt이 null이면 영구 링크이므로 만료되지 않는다 (new Date(null)은 1970년이라 반드시 먼저 거른다)
+-    if (info.expiresAt != null && new Date(info.expiresAt).getTime() <= Date.now()) return { label: '만료됨', cls: 'badge-warn', alive: false };
+-    return { label: '사용 중', cls: 'badge-success', alive: true };
+-  }
+-
+-  let toastTimer;
+-  function toast(message, isError = false) {
+-    const el = $('#toast');
+-    el.textContent = message;
+-    el.classList.toggle('is-error', isError);
+-    el.classList.add('is-show');
+-    clearTimeout(toastTimer);
+-    toastTimer = setTimeout(() => el.classList.remove('is-show'), 2400);
+-  }
+-
+-  async function copyText(text) {
+-    try {
+-      await navigator.clipboard.writeText(text);
+-    } catch {
+-      const ta = document.createElement('textarea');
+-      ta.value = text;
+-      ta.setAttribute('readonly', '');
+-      ta.style.position = 'fixed';
+-      ta.style.opacity = '0';
+-      document.body.appendChild(ta);
+-      ta.select();
+-      document.execCommand('copy');
+-      ta.remove();
++"use strict";
++
++const createPanel = document.querySelector("#create-panel");
++const lookupPanel = document.querySelector("#lookup-panel");
++const original = document.querySelector("#original-url");
++const keyInput = document.querySelector("#lookup-key");
++const rawEditor = document.querySelector("#raw-editor");
++const rawBody = document.querySelector("#raw-body");
++const periods = document.querySelector(".periods");
++
++function showPage() {
++    const active = location.hash === "#lookup" ? "#lookup" : "#create";
++    createPanel.hidden = active !== "#create";
++    lookupPanel.hidden = active !== "#lookup";
++    for (const link of document.querySelectorAll("nav a")) {
++        if (link.hash === active) link.setAttribute("aria-current", "page");
++        else link.removeAttribute("aria-current");
+     }
+-    toast('링크를 복사했어요');
+-  }
+-
+-  function setLoading(btn, loading) {
+-    btn.disabled = loading;
+-    btn.classList.toggle('is-loading', loading);
+-  }
+-
+-  // ---- API ----
+-  class ApiError extends Error {
+-    constructor(status, message) { super(message); this.status = status; }
+-  }
+-
+-  const FALLBACK_MESSAGES = {
+-    400: '입력값이 올바르지 않습니다. 다시 확인해 주세요.',
+-    404: '해당 단축 링크를 찾을 수 없습니다.',
+-    410: '만료된 링크입니다.',
+-    500: '서버에 문제가 발생했어요. 잠시 후 다시 시도해 주세요.',
+-  };
+-
+-  async function request(path, options = {}) {
+-    let res;
+-    try {
+-      res = await fetch(path, { headers: { Accept: 'application/json', ...(options.headers || {}) }, ...options });
+-    } catch {
+-      throw new ApiError(0, '서버에 연결할 수 없어요. 네트워크를 확인해 주세요.');
++}
++
++function formBody() {
++    const days = periods.querySelector(":checked").value;
++    const body = { originalUrl: original.value };
++    if (days !== "") body.expiresInDays = Number(days);
++    return JSON.stringify(body, null, 2);
++}
++
++function updateDraft() {
++    rawBody.value = formBody();
++}
++
++rawEditor.addEventListener("toggle", () => {
++    original.disabled = rawEditor.open;
++    periods.disabled = rawEditor.open;
++});
++original.addEventListener("input", updateDraft);
++periods.addEventListener("change", updateDraft);
++updateDraft();
++
++function notice(panel, message, error = false) {
++    const element = panel.querySelector(".notice");
++    element.classList.toggle("error", error);
++    element.textContent = message;
++}
++
++const expiryFormat = new Intl.DateTimeFormat("ko-KR", {
++    dateStyle: "medium", timeStyle: "long"
++});
++
++function displayLink(panel, data) {
++    const card = panel.querySelector(".result");
++    const link = new URL("/" + encodeURIComponent(data.shortenUrlKey), location.origin);
++    card.querySelector(".open-link").href = link.href;
++    const expiry = data.expiresAt ? expiryFormat.format(new Date(data.expiresAt)) : null;
++    if (panel === createPanel) {
++        card.querySelector(".short-address").textContent = link.host + link.pathname;
++        card.querySelector(".expiry").textContent = expiry ? expiry + " 만료" : "만료 없음";
++    } else {
++        card.querySelector(".destination").textContent = data.originalUrl;
++        card.querySelector(".expiry").textContent = expiry ?? "만료 없음";
++        card.querySelector(".count").textContent = data.redirectCount + "회";
+     }
+-    const text = await res.text();
+-    if (!res.ok) {
+-      let message = '';
+-      // 서버는 일반 문자열 또는 Spring 기본 오류 JSON을 반환할 수 있음
+-      try {
+-        const body = JSON.parse(text);
+-        message = res.status === 400 ? '' : (body.detail || body.message || '');
+-      } catch {
+-        message = text.trim().startsWith('<') ? '' : text.trim();
+-      }
+-      throw new ApiError(res.status, message || FALLBACK_MESSAGES[res.status] || `요청에 실패했어요 (${res.status})`);
++    card.hidden = false;
++}
++
++async function sendRequest(panel, path, options) {
++    const button = panel.querySelector('button[type="submit"]');
++    if (button.disabled) return;
++    button.disabled = true;
++    panel.querySelector(".result").hidden = true;
++    const trace = panel.querySelector(".trace");
++    trace.querySelector(".trace-empty").hidden = true;
++    trace.querySelector(".exchange").hidden = false;
++    const requestLines = [options.method + " " + path];
++    for (const [name, value] of Object.entries(options.headers ?? {})) {
++        requestLines.push(name + ": " + value);
+     }
+-    return text ? JSON.parse(text) : null;
+-  }
+-
+-  const api = {
+-    create: (originalUrl, expiresInDays) => request('/shorten-url', {
+-      method: 'POST',
+-      headers: { 'Content-Type': 'application/json' },
+-      // 영구 링크(null)는 필드를 생략한다
+-      body: JSON.stringify(expiresInDays == null ? { originalUrl } : { originalUrl, expiresInDays }),
+-    }),
+-    info: (key) => request(`/shorten-url/${encodeURIComponent(key)}`),
+-  };
+-
+-  // 예전 이름(trimlink.*)으로 저장된 값을 새 키로 한 번만 옮긴다
+-  [['trimlink.recent', RECENT_KEY], ['trimlink.theme', THEME_KEY]].forEach(([from, to]) => {
++    trace.querySelector(".request-meta").textContent = requestLines.join("\n");
++    trace.querySelector(".request-body").textContent = options.body ?? "(본문 없음)";
++    const responseMeta = trace.querySelector(".response-meta");
++    const responseBody = trace.querySelector(".response-body");
++    responseMeta.textContent = "응답 대기 중";
++    responseBody.textContent = "";
++    notice(panel, "요청을 보내는 중입니다.");
++    let response;
+     try {
+-      const v = localStorage.getItem(from);
+-      if (v != null && localStorage.getItem(to) == null) localStorage.setItem(to, v);
+-      localStorage.removeItem(from);
+-    } catch { /* 저장 불가 환경 무시 */ }
+-  });
+-
+-  // ---- 테마 ----
+-  const root = document.documentElement;
+-  const savedTheme = storage.get(THEME_KEY, null);
+-  if (savedTheme) root.dataset.theme = savedTheme;
+-  $('#themeToggle').addEventListener('click', () => {
+-    const current = root.dataset.theme
+-      || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+-    const next = current === 'dark' ? 'light' : 'dark';
+-    root.dataset.theme = next;
+-    storage.set(THEME_KEY, next);
+-  });
+-
+-  // ---- 탭 ----
+-  const tabs = document.querySelectorAll('.tab');
+-  function switchTab(name) {
+-    tabs.forEach((t) => {
+-      const active = t.dataset.tab === name;
+-      t.classList.toggle('is-active', active);
+-      t.setAttribute('aria-selected', String(active));
+-    });
+-    $('#panel-create').hidden = name !== 'create';
+-    $('#panel-lookup').hidden = name !== 'lookup';
+-    (name === 'create' ? $('#originalUrl') : $('#lookupInput')).focus();
+-  }
+-  tabs.forEach((t) => t.addEventListener('click', () => switchTab(t.dataset.tab)));
+-
+-  // ---- 만료 기간 ----
+-  let selectedDays = null; // null: 영구(기본), number: 일수, 'custom': 직접 입력
+-  const chips = document.querySelectorAll('.chip');
+-  const customWrap = $('#customDaysWrap');
+-  const customInput = $('#customDays');
+-
+-  // 현재 선택을 { valid, days }로 해석한다. days가 null이면 영구 링크.
+-  function currentExpiry() {
+-    if (selectedDays === null) return { valid: true, days: null };
+-    if (selectedDays !== 'custom') return { valid: true, days: selectedDays };
+-    const n = Number(customInput.value);
+-    const ok = customInput.value.trim() !== '' && Number.isInteger(n) && n >= MIN_DAYS && n <= MAX_DAYS;
+-    return { valid: ok, days: ok ? n : null };
+-  }
+-
+-  function updateExpiryHint() {
+-    const { valid, days } = currentExpiry();
+-    const hint = $('#expiryHint');
+-    if (!valid) {
+-      hint.textContent = `${MIN_DAYS}일에서 ${MAX_DAYS}일 사이의 정수를 입력해 주세요.`;
+-      return;
+-    }
+-    if (days === null) {
+-      hint.textContent = '만료 없이 계속 사용할 수 있어요.';
+-      return;
+-    }
+-    const at = new Date(Date.now() + days * 86400000);
+-    hint.textContent = `${dateFmt.format(at)}까지 사용할 수 있어요.`;
+-  }
+-
+-  chips.forEach((chip) => chip.addEventListener('click', () => {
+-    chips.forEach((c) => {
+-      const active = c === chip;
+-      c.classList.toggle('is-active', active);
+-      c.setAttribute('aria-checked', String(active));
+-    });
+-    const v = chip.dataset.days;
+-    selectedDays = v === 'custom' ? 'custom' : v === 'none' ? null : Number(v);
+-    customWrap.hidden = v !== 'custom';
+-    if (v === 'custom') customInput.focus();
+-    updateExpiryHint();
+-  }));
+-  customInput.addEventListener('input', updateExpiryHint);
+-  customInput.addEventListener('keydown', (e) => {
+-    if (e.key === 'Enter') { e.preventDefault(); $('#createForm').requestSubmit(); }
+-  });
+-  updateExpiryHint();
+-
+-  // ---- 링크 만들기 ----
+-  const urlInput = $('#originalUrl');
+-  const urlError = $('#urlError');
+-
+-  function normalizeUrl(raw) {
+-    const v = raw.trim();
+-    if (!v) return v;
+-    return /^[a-z][a-z\d+.-]*:\/\//i.test(v) ? v : `https://${v}`;
+-  }
+-
+-  function showUrlError(msg) {
+-    urlError.textContent = msg;
+-    urlInput.setAttribute('aria-invalid', msg ? 'true' : 'false');
+-  }
+-
+-  urlInput.addEventListener('input', () => { if (urlError.textContent) showUrlError(''); });
+-
+-  $('#pasteBtn').addEventListener('click', async () => {
+-    try {
+-      const text = await navigator.clipboard.readText();
+-      if (text) { urlInput.value = text.trim(); showUrlError(''); }
+-      urlInput.focus();
++        response = await fetch(path, options);
++        const status = ("HTTP " + response.status + " " + response.statusText).trimEnd();
++        const responseLines = [status];
++        for (const [name, value] of response.headers) responseLines.push(name + ": " + value);
++        responseMeta.textContent = responseLines.join("\n");
++        const text = await response.text();
++        responseBody.textContent = text;
++        if (!response.ok) {
++            notice(panel, status + " · 서버 응답을 확인해 주세요.", true);
++            trace.open = true;
++            return;
++        }
++        try {
++            const data = JSON.parse(text);
++            if (typeof data?.shortenUrlKey !== "string") throw new Error();
++            displayLink(panel, data);
++            notice(panel, "");
++        } catch {
++            notice(panel, status + " · 링크 정보를 표시할 수 없습니다. 응답 본문을 확인해 주세요.", true);
++            trace.open = true;
++        }
+     } catch {
+-      toast('클립보드 접근이 허용되지 않았어요. 직접 붙여넣어 주세요.', true);
+-      urlInput.focus();
+-    }
+-  });
+-
+-  $('#createForm').addEventListener('submit', async (e) => {
+-    e.preventDefault();
+-    const raw = urlInput.value;
+-    if (!raw.trim()) { showUrlError('단축할 URL을 입력해 주세요.'); urlInput.focus(); return; }
+-    const url = normalizeUrl(raw);
+-    // 자동으로 붙인 https://까지 포함한 실제 전송 길이로 검사한다
+-    if (url.length > MAX_URL_LENGTH) {
+-      showUrlError(`URL이 너무 길어요. ${numFmt.format(MAX_URL_LENGTH)}자 이하로 입력해 주세요. (현재 ${numFmt.format(url.length)}자)`);
+-      urlInput.focus();
+-      return;
+-    }
+-    if (!URL_RE.test(url)) {
+-      showUrlError('올바른 URL 형식이 아니에요. http:// 또는 https://로 시작하는 주소를 입력해 주세요.');
+-      urlInput.focus();
+-      return;
+-    }
+-    const { valid, days } = currentExpiry();
+-    if (!valid) { customInput.focus(); toast(`만료 기간은 ${MIN_DAYS}~${MAX_DAYS}일 사이로 입력해 주세요.`, true); return; }
+-    showUrlError('');
+-
+-    const btn = $('#createBtn');
+-    setLoading(btn, true);
+-    try {
+-      const data = await api.create(url, days);
+-      urlInput.value = url;
+-      showResult(data);
+-      addRecent(data);
+-    } catch (err) {
+-      if (err.status === 400) showUrlError(err.message);
+-      else toast(err.message, true);
++        const message = response ? "응답 본문을 다 받지 못했습니다." : "서버 응답을 받지 못했습니다. 연결을 확인해 주세요.";
++        if (!response) responseMeta.textContent = "네트워크 오류 · HTTP 응답 없음";
++        notice(panel, message, true);
++        trace.open = true;
+     } finally {
+-      setLoading(btn, false);
++        button.disabled = false;
+     }
+-  });
+-
+-  function showResult(data) {
+-    const link = shortUrlOf(data.shortenUrlKey);
+-    $('#resultShort').textContent = link.replace(/^https?:\/\//, '');
+-    $('#resultShort').href = link;
+-    $('#resultOpen').href = link;
+-    $('#resultOrigin').textContent = data.originalUrl;
+-    $('#resultExpiry').textContent = data.expiresAt == null
+-      ? '만료 없음 · 영구 링크'
+-      : `${dateFmt.format(new Date(data.expiresAt))} 만료 · ${remainText(data.expiresAt)}`;
+-    $('#resultCopy').onclick = () => copyText(link);
+-    $('#result').hidden = false;
+-    $('#resultCopy').focus({ preventScroll: true });
+-    $('#result').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+-  }
+-
+-  // ---- 링크 조회 ----
+-  const lookupInput = $('#lookupInput');
+-  const lookupError = $('#lookupError');
+-  let currentInfo = null;
++}
++
++for (const panel of [createPanel, lookupPanel]) {
++    panel.append(document.querySelector("#trace-template").content.cloneNode(true));
++}
++createPanel.querySelector("form").addEventListener("submit", event => {
++    event.preventDefault();
++    sendRequest(createPanel, "/shorten-url", {
++        method: "POST",
++        headers: { "Content-Type": "application/json" },
++        body: rawEditor.open ? rawBody.value : formBody()
++    });
++});
++lookupPanel.querySelector("form").addEventListener("submit", event => {
++    event.preventDefault();
++    sendRequest(lookupPanel, "/shorten-url/" + encodeURIComponent(keyInput.value), {
++        method: "GET", cache: "no-store"
++    });
++});
+ 
+-  function extractKey(raw) {
+-    const v = raw.trim();
+-    if (KEY_RE.test(v)) return v;
++createPanel.querySelector(".copy").addEventListener("click", async () => {
++    const url = createPanel.querySelector(".open-link").href;
+     try {
+-      const u = new URL(/^https?:\/\//i.test(v) ? v : `https://${v}`);
+-      const seg = u.pathname.split('/').filter(Boolean).pop() || '';
+-      return KEY_RE.test(seg) ? seg : null;
++        await navigator.clipboard.writeText(url);
++        notice(createPanel, "단축 링크를 복사했습니다.");
+     } catch {
+-      return null;
+-    }
+-  }
+-
+-  lookupInput.addEventListener('input', () => {
+-    lookupError.textContent = '';
+-    lookupInput.setAttribute('aria-invalid', 'false');
+-  });
+-
+-  async function lookup(key) {
+-    const btn = $('#lookupBtn');
+-    setLoading(btn, true);
+-    try {
+-      const data = await api.info(key);
+-      renderInfo(data);
+-      updateRecent(data);
+-      return data;
+-    } catch (err) {
+-      $('#info').hidden = true;
+-      lookupError.textContent = err.message;
+-      lookupInput.setAttribute('aria-invalid', 'true');
+-      if (err.status === 404) markRecentMissing(key);
+-      return null;
+-    } finally {
+-      setLoading(btn, false);
++        window.prompt("아래 단축 링크를 복사해 주세요.", url);
+     }
+-  }
+-
+-  $('#lookupForm').addEventListener('submit', (e) => {
+-    e.preventDefault();
+-    const raw = lookupInput.value;
+-    if (!raw.trim()) { lookupError.textContent = '조회할 단축 링크나 키를 입력해 주세요.'; lookupInput.focus(); return; }
+-    const key = extractKey(raw);
+-    if (!key) {
+-      lookupError.textContent = `단축 키는 ${KEY_LENGTH}자리 영문·숫자 조합이에요. 링크를 다시 확인해 주세요.`;
+-      lookupInput.setAttribute('aria-invalid', 'true');
+-      return;
+-    }
+-    lookup(key);
+-  });
+-
+-  function renderInfo(data) {
+-    currentInfo = data;
+-    const link = shortUrlOf(data.shortenUrlKey);
+-    const st = statusOf(data);
+-    $('#infoShort').textContent = link.replace(/^https?:\/\//, '');
+-    $('#infoShort').href = link;
+-    const badge = $('#infoStatus');
+-    badge.textContent = st.label;
+-    badge.className = `badge ${st.cls}`;
+-    $('#infoClicks').textContent = `${numFmt.format(data.redirectCount ?? 0)}회`;
+-    const permanent = data.expiresAt == null;
+-    $('#infoExpires').textContent = permanent ? '없음 (영구)' : dateFmt.format(new Date(data.expiresAt));
+-    $('#infoExpires').title = permanent ? '' : dateTimeFmt.format(new Date(data.expiresAt));
+-    $('#infoRemain').textContent = remainText(data.expiresAt);
+-    $('#infoOrigin').textContent = data.originalUrl;
+-    $('#infoOrigin').href = data.originalUrl;
+-    $('#info').hidden = false;
+-  }
+-
+-  $('#infoCopy').addEventListener('click', () => currentInfo && copyText(shortUrlOf(currentInfo.shortenUrlKey)));
+-  $('#infoRefresh').addEventListener('click', () => currentInfo && lookup(currentInfo.shortenUrlKey).then((d) => d && toast('최신 정보로 갱신했어요')));
+-
+-  function openLookup(key) {
+-    switchTab('lookup');
+-    lookupInput.value = shortUrlOf(key);
+-    lookup(key);
+-    $('.main-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+-  }
+-
+-  // ---- 최근 만든 링크 (이 브라우저에만 저장) ----
+-  let recent = storage.get(RECENT_KEY, []);
+-  if (!Array.isArray(recent)) recent = [];
+-  // 삭제 기능이 있던 시절에 저장된 deletedAt 값은 더 이상 쓰지 않으므로 정리한다
+-  recent = recent.filter((r) => r && typeof r === 'object');
+-  recent.forEach((r) => { delete r.deletedAt; });
+-
+-  function saveRecent() { storage.set(RECENT_KEY, recent.slice(0, RECENT_LIMIT)); }
+-
+-  function addRecent(data) {
+-    recent = [{ ...data, createdAt: new Date().toISOString() }, ...recent.filter((r) => r.shortenUrlKey !== data.shortenUrlKey)].slice(0, RECENT_LIMIT);
+-    saveRecent();
+-    renderRecent();
+-  }
+-
+-  function updateRecent(data) {
+-    const idx = recent.findIndex((r) => r.shortenUrlKey === data.shortenUrlKey);
+-    if (idx < 0) return;
+-    recent[idx] = { ...recent[idx], ...data, missing: false };
+-    saveRecent();
+-    renderRecent();
+-  }
+-
+-  function markRecentMissing(key) {
+-    const item = recent.find((r) => r.shortenUrlKey === key);
+-    if (item) { item.missing = true; saveRecent(); renderRecent(); }
+-  }
+-
+-  function el(tag, attrs = {}, children = []) {
+-    const node = document.createElement(tag);
+-    Object.entries(attrs).forEach(([k, v]) => {
+-      if (k === 'class') node.className = v;
+-      else if (k === 'text') node.textContent = v;
+-      else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+-      else node.setAttribute(k, v);
+-    });
+-    children.forEach((c) => c && node.appendChild(c));
+-    return node;
+-  }
+-
+-  function renderRecent() {
+-    const list = $('#recentList');
+-    list.replaceChildren();
+-    $('#recentSection').hidden = recent.length === 0;
+-    recent.forEach((item) => {
+-      const link = shortUrlOf(item.shortenUrlKey);
+-      const st = item.missing ? { label: '찾을 수 없음', cls: 'badge-danger', alive: false } : statusOf(item);
+-      const li = el('li', { class: `recent-item${st.alive ? '' : ' is-dead'}` }, [
+-        el('div', { class: 'recent-main' }, [
+-          el('a', { class: 'recent-short', href: link, target: '_blank', rel: 'noopener', text: link.replace(/^https?:\/\//, '') }),
+-          el('div', { class: 'recent-origin', title: item.originalUrl, text: item.originalUrl }),
+-          el('div', { class: 'recent-meta' }, [
+-            el('span', { class: `badge ${st.cls}`, text: st.label }),
+-            el('span', { text: `클릭 ${numFmt.format(item.redirectCount ?? 0)}회` }),
+-            st.alive ? el('span', { text: remainText(item.expiresAt) }) : null,
+-          ]),
+-        ]),
+-        el('div', { class: 'recent-actions' }, [
+-          st.alive ? el('button', { class: 'btn btn-ghost', type: 'button', text: '복사', onclick: () => copyText(link) }) : null,
+-          el('button', { class: 'btn btn-ghost', type: 'button', text: '상세', onclick: () => openLookup(item.shortenUrlKey) }),
+-          el('button', {
+-            class: 'btn btn-ghost', type: 'button', text: '숨기기', title: '목록에서만 숨깁니다',
+-            onclick: () => { recent = recent.filter((r) => r.shortenUrlKey !== item.shortenUrlKey); saveRecent(); renderRecent(); },
+-          }),
+-        ]),
+-      ]);
+-      list.appendChild(li);
+-    });
+-  }
+-
+-  $('#clearRecent').addEventListener('click', () => {
+-    recent = [];
+-    saveRecent();
+-    renderRecent();
+-    toast('목록을 지웠어요. 링크는 그대로 사용할 수 있어요.');
+-  });
+-
+-  async function refreshRecent() {
+-    await Promise.all(recent.map(async (item) => {
+-      try {
+-        const data = await api.info(item.shortenUrlKey);
+-        Object.assign(item, data, { missing: false });
+-      } catch (err) {
+-        if (err.status === 404) item.missing = true;
+-      }
+-    }));
+-    saveRecent();
+-    renderRecent();
+-  }
++});
+ 
+-  // ---- 초기화 ----
+-  $('#year').textContent = new Date().getFullYear();
+-  renderRecent();
+-  if (recent.length) refreshRecent();
+-  urlInput.focus();
+-})();
++window.addEventListener("hashchange", showPage);
++showPage();
+diff --git a/src/main/resources/static/page/expired.html b/src/main/resources/static/page/expired.html
+index 86a2290..0f4c114 100644
+--- a/src/main/resources/static/page/expired.html
++++ b/src/main/resources/static/page/expired.html
+@@ -1,65 +1,21 @@
+ <!doctype html>
+ <html lang="ko">
+ <head>
+-  <meta charset="utf-8">
+-  <meta name="viewport" content="width=device-width, initial-scale=1">
+-  <title>사용할 수 없는 링크 · Brevlet</title>
+-  <meta name="robots" content="noindex">
+-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Cpath d='M13 19l6-6M11.5 15.5l-2 2a3.5 3.5 0 005 5l2-2M20.5 16.5l2-2a3.5 3.5 0 00-5-5l-2 2' stroke='white' stroke-width='2.2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+-  <!-- 이 페이지는 /{key} 주소에서 410으로 직접 응답되므로, 자원 경로는 반드시 절대 경로로 쓴다 -->
+-  <link rel="stylesheet" href="/page/app.css">
+-  <script>
+-    // 메인 페이지에서 저장한 테마를 그대로 적용한다 (저장 불가 환경에서는 시스템 설정을 따른다)
+-    try {
+-      var t = JSON.parse(localStorage.getItem('brevlet.theme'));
+-      if (t === 'dark' || t === 'light') document.documentElement.dataset.theme = t;
+-    } catch (e) {}
+-  </script>
+-  <style>
+-    .notice-wrap { flex: 1; display: grid; place-items: center; padding: 48px 16px; }
+-    .notice { width: 100%; max-width: 480px; padding: 40px 28px 32px; text-align: center; }
+-    .notice-icon {
+-      display: grid; place-items: center; width: 64px; height: 64px; margin: 0 auto 20px;
+-      border-radius: 50%; background: var(--warn-soft); color: var(--warn);
+-    }
+-    .notice-icon svg { width: 30px; height: 30px; stroke-width: 2; }
+-    /* 한글이 단어 중간에서 끊기지 않도록 어절 단위로 줄바꿈한다 */
+-    .notice h1 { margin: 0 0 10px; font-size: 22px; line-height: 1.3; letter-spacing: -.02em; word-break: keep-all; text-wrap: balance; }
+-    .notice p { margin: 0 auto; max-width: 360px; color: var(--text-2); word-break: keep-all; }
+-    .notice-actions { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; margin-top: 26px; }
+-    .notice-code { margin-top: 22px; font-size: 12px; color: var(--text-3); }
+-  </style>
++    <meta charset="utf-8">
++    <meta name="viewport" content="width=device-width, initial-scale=1">
++    <title>만료된 링크 · Brevlet</title>
++    <link rel="icon" href="data:,">
++    <link rel="stylesheet" href="/page/app.css">
+ </head>
+ <body>
+-  <header class="topbar">
+-    <div class="container topbar-inner">
+-      <a class="brand" href="/" aria-label="Brevlet 홈">
+-        <span class="brand-mark" aria-hidden="true">
+-          <svg viewBox="0 0 24 24"><path d="M9 15l6-6M7.5 11.5l-2 2a3.5 3.5 0 005 5l2-2M16.5 12.5l2-2a3.5 3.5 0 00-5-5l-2 2"/></svg>
+-        </span>
+-        Brevlet
+-      </a>
+-    </div>
+-  </header>
+-
+-  <main class="container notice-wrap">
+-    <section class="card notice" aria-labelledby="notice-title">
+-      <div class="notice-icon" aria-hidden="true">
+-        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+-      </div>
+-      <h1 id="notice-title">이 링크는 더 이상 사용할 수 없어요</h1>
+-      <p>기간이 지나 만료되었거나 사용이 중단된 링크예요. 링크를 보내 준 분께 새 링크를 요청해 보세요.</p>
+-      <div class="notice-actions">
+-        <a class="btn btn-primary btn-lg" href="/">새 링크 만들기</a>
+-      </div>
+-      <div class="notice-code">오류 코드 410</div>
++<main class="shell expired-page">
++    <header class="masthead"><h1>Brevlet</h1></header>
++    <section class="card expired-card">
++        <p class="http-code">410 Gone</p>
++        <h2>만료된 링크입니다</h2>
++        <p>이 단축 링크의 사용 기간이 끝났습니다.</p>
++        <a class="primary" href="/#create">새 링크 만들기</a>
+     </section>
+-  </main>
+-
+-  <footer class="footer">
+-    <div class="container">© <span id="year"></span> Brevlet</div>
+-  </footer>
+-
+-  <script>document.getElementById('year').textContent = new Date().getFullYear();</script>
++</main>
+ </body>
+ </html>
+diff --git a/src/main/resources/static/page/index.html b/src/main/resources/static/page/index.html
+index 2f27779..cb40e3f 100644
+--- a/src/main/resources/static/page/index.html
++++ b/src/main/resources/static/page/index.html
+@@ -1,172 +1,84 @@
+ <!doctype html>
+ <html lang="ko">
+ <head>
+-  <meta charset="utf-8">
+-  <meta name="viewport" content="width=device-width, initial-scale=1">
+-  <title>Brevlet · 짧고 깔끔한 링크</title>
+-  <meta name="description" content="긴 URL을 짧은 링크로 바꾸고, 만료 기간과 클릭 수를 한눈에 관리하세요.">
+-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Cpath d='M13 19l6-6M11.5 15.5l-2 2a3.5 3.5 0 005 5l2-2M20.5 16.5l2-2a3.5 3.5 0 00-5-5l-2 2' stroke='white' stroke-width='2.2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+-  <link rel="stylesheet" href="/page/app.css">
++    <meta charset="utf-8">
++    <meta name="viewport" content="width=device-width, initial-scale=1">
++    <title>Brevlet</title>
++    <link rel="icon" href="data:,">
++    <link rel="stylesheet" href="/page/app.css">
++    <script src="/page/app.js" defer></script>
+ </head>
+ <body>
+-  <header class="topbar">
+-    <div class="container topbar-inner">
+-      <a class="brand" href="/" aria-label="Brevlet 홈">
+-        <span class="brand-mark" aria-hidden="true">
+-          <svg viewBox="0 0 24 24"><path d="M9 15l6-6M7.5 11.5l-2 2a3.5 3.5 0 005 5l2-2M16.5 12.5l2-2a3.5 3.5 0 00-5-5l-2 2"/></svg>
+-        </span>
+-        Brevlet
+-      </a>
+-      <button class="icon-btn" id="themeToggle" type="button" aria-label="테마 전환" title="테마 전환">
+-        <svg class="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+-        <svg class="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg>
+-      </button>
+-    </div>
+-  </header>
+-
+-  <main class="container">
+-    <section class="hero">
+-      <h1>긴 링크를 <span class="accent">짧고 깔끔하게</span></h1>
+-      <p class="lead">URL을 붙여넣고 버튼 한 번이면 끝. 만료 기간과 클릭 수까지 한눈에 확인하세요.</p>
+-    </section>
+-
+-    <section class="card main-card">
+-      <div class="tabs" role="tablist">
+-        <button class="tab is-active" role="tab" id="tab-create" aria-selected="true" aria-controls="panel-create" data-tab="create">링크 만들기</button>
+-        <button class="tab" role="tab" id="tab-lookup" aria-selected="false" aria-controls="panel-lookup" data-tab="lookup">링크 조회</button>
+-      </div>
+-
+-      <!-- 링크 만들기 -->
+-      <div class="panel" id="panel-create" role="tabpanel" aria-labelledby="tab-create">
+-        <form id="createForm" novalidate>
+-          <label class="field-label" for="originalUrl">단축할 URL</label>
+-          <div class="input-row">
+-            <div class="input-wrap">
+-              <svg class="input-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 14a5 5 0 007.07 0l3-3a5 5 0 00-7.07-7.07l-1 1M14 10a5 5 0 00-7.07 0l-3 3a5 5 0 007.07 7.07l1-1"/></svg>
+-              <input id="originalUrl" name="originalUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false"
+-                     placeholder="https://example.com/아주/긴/주소" required>
+-              <button type="button" class="paste-btn" id="pasteBtn" title="클립보드에서 붙여넣기">붙여넣기</button>
+-            </div>
+-            <button type="submit" class="btn btn-primary btn-lg" id="createBtn">
+-              <span class="btn-label">단축하기</span>
+-              <span class="spinner" aria-hidden="true"></span>
+-            </button>
+-          </div>
+-          <p class="field-error" id="urlError" role="alert"></p>
+-
+-          <div class="expiry">
+-            <span class="field-label">만료 기간 <span class="hint-inline">(선택)</span></span>
+-            <div class="chips" role="radiogroup" aria-label="만료 기간">
+-              <button type="button" class="chip is-active" data-days="none" role="radio" aria-checked="true">영구</button>
+-              <button type="button" class="chip" data-days="1" role="radio" aria-checked="false">1일</button>
+-              <button type="button" class="chip" data-days="7" role="radio" aria-checked="false">7일</button>
+-              <button type="button" class="chip" data-days="30" role="radio" aria-checked="false">30일</button>
+-              <button type="button" class="chip" data-days="90" role="radio" aria-checked="false">90일</button>
+-              <button type="button" class="chip" data-days="365" role="radio" aria-checked="false">1년</button>
+-              <button type="button" class="chip" data-days="custom" role="radio" aria-checked="false">직접 입력</button>
++<main class="shell">
++    <header class="masthead">
++        <h1>Brevlet</h1>
++        <nav aria-label="링크 메뉴">
++            <a href="#create" aria-current="page">만들기</a>
++            <a href="#lookup">조회</a>
++        </nav>
++    </header>
++    <section id="create-panel" class="panel" aria-label="링크 만들기">
++        <form class="card form-card" novalidate>
++            <label class="field-label" for="original-url">원본 URL</label>
++            <div class="input-row">
++                <input id="original-url" type="text" placeholder="https://example.com/event" spellcheck="false" autocapitalize="none">
++                <button class="primary" type="submit">단축하기</button>
+             </div>
+-            <div class="custom-days" id="customDaysWrap" hidden>
+-              <input id="customDays" type="number" min="1" max="365" step="1" placeholder="1 ~ 365" aria-label="만료 일수">
+-              <span>일 후 만료</span>
+-            </div>
+-            <p class="hint" id="expiryHint"></p>
+-          </div>
++            <fieldset class="periods">
++                <legend>만료 기간</legend>
++                <label><input type="radio" name="days" value="" checked><span>영구</span></label>
++                <label><input type="radio" name="days" value="1"><span>1일</span></label>
++                <label><input type="radio" name="days" value="7"><span>7일</span></label>
++                <label><input type="radio" name="days" value="30"><span>30일</span></label>
++            </fieldset>
++            <details id="raw-editor">
++                <summary>요청 본문 편집</summary>
++                <label class="hint" for="raw-body">편집기를 열어 둔 상태에서 단축하면 아래 본문이 그대로 전송됩니다.</label>
++                <textarea id="raw-body" rows="5" spellcheck="false" autocapitalize="none"></textarea>
++            </details>
+         </form>
+-
+-        <div class="result" id="result" hidden aria-live="polite">
+-          <div class="result-head">
+-            <span class="badge badge-success">생성 완료</span>
+-            <span class="result-exp" id="resultExpiry"></span>
+-          </div>
+-          <div class="short-row">
+-            <a class="short-url" id="resultShort" target="_blank" rel="noopener"></a>
+-            <div class="short-actions">
+-              <button class="btn btn-primary" id="resultCopy" type="button">
+-                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
+-                <span>복사</span>
+-              </button>
+-              <a class="btn btn-ghost" id="resultOpen" target="_blank" rel="noopener" title="새 탭에서 열기">
+-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 01-1 1H5a1 1 0 01-1-1V7a1 1 0 011-1h5"/></svg>
+-              </a>
++        <p class="notice" role="status"></p>
++        <section class="card result" aria-label="생성 결과" hidden>
++            <h2>단축 링크</h2>
++            <div class="result-row">
++                <strong class="short-address"></strong>
++                <button class="action copy" type="button">복사</button>
++                <a class="action open-link" target="_blank" rel="noopener noreferrer" aria-label="단축 링크 열기 (새 창)">링크 열기 <b aria-hidden="true">»</b></a>
+             </div>
+-          </div>
+-          <p class="result-origin">원본 <span id="resultOrigin"></span></p>
+-        </div>
+-      </div>
+-
+-      <!-- 링크 조회 -->
+-      <div class="panel" id="panel-lookup" role="tabpanel" aria-labelledby="tab-lookup" hidden>
+-        <form id="lookupForm" novalidate>
+-          <label class="field-label" for="lookupInput">단축 링크 또는 키</label>
+-          <div class="input-row">
+-            <div class="input-wrap">
+-              <svg class="input-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+-              <input id="lookupInput" type="text" autocomplete="off" spellcheck="false" placeholder="예: AbCd2345 또는 단축 링크 전체">
++            <p class="expiry"></p>
++        </section>
++    </section>
++    <section id="lookup-panel" class="panel" aria-label="링크 조회" hidden>
++        <form class="card form-card" novalidate>
++            <label class="field-label" for="lookup-key">단축 키</label>
++            <div class="input-row">
++                <input id="lookup-key" type="text" placeholder="AbCd2345" spellcheck="false" autocapitalize="none">
++                <button class="primary" type="submit">조회하기</button>
+             </div>
+-            <button type="submit" class="btn btn-primary btn-lg" id="lookupBtn">
+-              <span class="btn-label">조회</span>
+-              <span class="spinner" aria-hidden="true"></span>
+-            </button>
+-          </div>
+-          <p class="field-error" id="lookupError" role="alert"></p>
+         </form>
+-
+-        <div class="info" id="info" hidden aria-live="polite">
+-          <div class="info-head">
+-            <a class="short-url" id="infoShort" target="_blank" rel="noopener"></a>
+-            <span class="badge" id="infoStatus"></span>
+-          </div>
+-          <dl class="stats">
+-            <div class="stat"><dt>클릭 수</dt><dd id="infoClicks">0</dd></div>
+-            <div class="stat"><dt>만료일</dt><dd id="infoExpires">-</dd></div>
+-            <div class="stat"><dt>남은 기간</dt><dd id="infoRemain">-</dd></div>
+-          </dl>
+-          <div class="info-origin">
+-            <span class="field-label">원본 URL</span>
+-            <a id="infoOrigin" target="_blank" rel="noopener noreferrer"></a>
+-          </div>
+-          <div class="info-actions">
+-            <button class="btn btn-ghost" id="infoCopy" type="button">링크 복사</button>
+-            <button class="btn btn-ghost" id="infoRefresh" type="button">새로고침</button>
+-          </div>
+-        </div>
+-      </div>
++        <p class="notice" role="status"></p>
++        <section class="card result" aria-label="조회 결과" hidden>
++            <h2>링크 정보</h2>
++            <dl class="info">
++                <dt>원본 URL</dt><dd class="destination"></dd>
++                <dt>만료 시각</dt><dd class="expiry"></dd>
++                <dt>이동 횟수</dt><dd class="count"></dd>
++            </dl>
++            <a class="action open-link" target="_blank" rel="noopener noreferrer" aria-label="단축 링크 열기 (새 창)">링크 열기 <b aria-hidden="true">»</b></a>
++        </section>
+     </section>
+-
+-    <section class="recent" id="recentSection" hidden>
+-      <div class="recent-head">
+-        <h2>최근 만든 링크</h2>
+-        <button class="text-btn" id="clearRecent" type="button">목록 지우기</button>
+-      </div>
+-      <p class="recent-note">이 브라우저에서 만든 링크만 표시됩니다.</p>
+-      <ul class="recent-list" id="recentList"></ul>
+-    </section>
+-
+-    <section class="features" aria-label="주요 기능">
+-      <div class="feature">
+-        <div class="f-icon"><svg viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg></div>
+-        <h3>즉시 생성</h3>
+-        <p>회원가입 없이 바로 짧은 링크를 만들 수 있어요.</p>
+-      </div>
+-      <div class="feature">
+-        <div class="f-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+-        <h3>만료 기간 설정</h3>
+-        <p>기본은 영구 링크예요. 원하면 1일부터 1년까지 만료 기간을 정할 수 있어요.</p>
+-      </div>
+-      <div class="feature">
+-        <div class="f-icon"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg></div>
+-        <h3>클릭 통계</h3>
+-        <p>링크가 몇 번 열렸는지 언제든 확인할 수 있어요.</p>
+-      </div>
+-    </section>
+-  </main>
+-
+-  <footer class="footer">
+-    <div class="container">© <span id="year"></span> Brevlet</div>
+-  </footer>
+-
+-  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+-
+-  <script src="/page/app.js"></script>
++    <template id="trace-template">
++        <details class="card trace">
++            <summary>요청·응답 상세</summary>
++            <p class="trace-empty hint">요청을 보내면 여기에 기록됩니다.</p>
++            <div class="exchange" hidden>
++                <h3>요청</h3><pre class="request-meta"></pre>
++                <h3>요청 본문</h3><pre class="request-body"></pre>
++                <h3>응답</h3><pre class="response-meta"></pre>
++                <h3>응답 본문</h3><pre class="response-body"></pre>
++            </div>
++        </details>
++    </template>
++</main>
+ </body>
+ </html>
+diff --git a/src/test/java/io/github/tkdgh816/brevlet/ShortenUrlRedirectConcurrencyTest.java b/src/test/java/io/github/tkdgh816/brevlet/ShortenUrlRedirectConcurrencyTest.java
+new file mode 100644
+index 0000000..db58535
+--- /dev/null
++++ b/src/test/java/io/github/tkdgh816/brevlet/ShortenUrlRedirectConcurrencyTest.java
+@@ -0,0 +1,78 @@
++package io.github.tkdgh816.brevlet;
++
++import io.github.tkdgh816.brevlet.application.ShortenUrlService;
++import io.github.tkdgh816.brevlet.dto.url.CreateShortenUrlRequest;
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.boot.test.web.server.LocalServerPort;
++import org.springframework.test.context.ActiveProfiles;
++
++import java.net.URI;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import java.time.Duration;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.CyclicBarrier;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Future;
++import java.util.concurrent.TimeUnit;
++
++import static org.assertj.core.api.Assertions.assertThat;
++
++@ActiveProfiles("h2")
++@SpringBootTest(
++        webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
++        properties = "spring.datasource.url=jdbc:h2:mem:redirect_concurrency"
++)
++class ShortenUrlRedirectConcurrencyTest {
++
++    private static final int REQUEST_COUNT = 20;
++    private static final String ORIGINAL_URL = "https://example.com/article";
++
++    @LocalServerPort
++    private int port;
++
++    @Autowired
++    private ShortenUrlService shortenUrlService;
++
++    @Test
++    @DisplayName("같은 링크에 리다이렉트 요청 20건이 동시에 성공하면 조회 수는 20이다")
++    void concurrentRedirects_incrementCountExactly20Times() throws Exception {
++        var created = shortenUrlService.generateShortenUrl(new CreateShortenUrlRequest(ORIGINAL_URL, null));
++        String key = created.shortenUrlKey();
++        assertThat(shortenUrlService.getShortenUrlInfoByKey(key).redirectCount())
++                .as("요청 전 조회 수").isZero();
++
++        var request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/" + key))
++                .timeout(Duration.ofSeconds(30))
++                .GET()
++                .build();
++        var startBarrier = new CyclicBarrier(REQUEST_COUNT);
++
++        try (var client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
++             var workers = Executors.newFixedThreadPool(REQUEST_COUNT)) {
++            List<Future<HttpResponse<Void>>> responses = new ArrayList<>(REQUEST_COUNT);
++            for (int i = 0; i < REQUEST_COUNT; i++) {
++                responses.add(workers.submit(() -> {
++                    startBarrier.await(10, TimeUnit.SECONDS);
++                    return client.send(request, HttpResponse.BodyHandlers.discarding());
++                }));
++            }
++
++            for (int i = 0; i < responses.size(); i++) {
++                var response = responses.get(i).get(45, TimeUnit.SECONDS);
++                assertThat(response.statusCode()).as("%d번째 요청의 상태 코드", i + 1).isEqualTo(302);
++                assertThat(response.headers().firstValue("Location"))
++                        .as("%d번째 요청의 리다이렉트 목적지", i + 1).contains(ORIGINAL_URL);
++            }
++        }
++
++        assertThat(shortenUrlService.getShortenUrlInfoByKey(key).redirectCount())
++                .as("키 %s에 대한 리다이렉트 요청 %d건 완료 후 조회 수", key, REQUEST_COUNT)
++                .isEqualTo((long) REQUEST_COUNT);
++    }
++}
+diff --git a/src/test/java/io/github/tkdgh816/brevlet/infrastructure/persistence/DatabaseShortenUrlRepositoryTest.java b/src/test/java/io/github/tkdgh816/brevlet/infrastructure/persistence/DatabaseShortenUrlRepositoryTest.java
+new file mode 100644
+index 0000000..7d0fa17
+--- /dev/null
++++ b/src/test/java/io/github/tkdgh816/brevlet/infrastructure/persistence/DatabaseShortenUrlRepositoryTest.java
+@@ -0,0 +1,102 @@
++package io.github.tkdgh816.brevlet.infrastructure.persistence;
++
++import io.github.tkdgh816.brevlet.domain.key.ShortenUrlKeyConflictException;
++import io.github.tkdgh816.brevlet.domain.url.ShortenUrl;
++import io.github.tkdgh816.brevlet.domain.url.ShortenUrlNotFoundException;
++import io.github.tkdgh816.brevlet.domain.url.ShortenUrlRepository;
++import org.junit.jupiter.api.DisplayName;
++import org.junit.jupiter.api.Test;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.test.context.ActiveProfiles;
++
++import java.time.Instant;
++import java.time.LocalDateTime;
++import java.time.ZoneOffset;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++
++@ActiveProfiles("h2")
++@SpringBootTest(
++        webEnvironment = SpringBootTest.WebEnvironment.NONE,
++        properties = "spring.datasource.url=jdbc:h2:mem:shorten_url_repository_test"
++)
++class DatabaseShortenUrlRepositoryTest {
++
++    private static final String ORIGINAL_URL = "https://example.com/article";
++
++    @Autowired
++    private ShortenUrlRepository repository;
++
++    @Test
++    @DisplayName("중복 키 생성이 실패해도 기존 목적지, 만료 시각, 조회 수가 보존된다")
++    void duplicateKeyPreservesExistingLink() {
++        String key = "AbCd2345";
++        Instant expiresAt = Instant.parse("2030-05-01T12:34:56Z");
++        repository.create(new ShortenUrl(ORIGINAL_URL, key, expiresAt));
++        repository.increaseRedirectCount(key);
++
++        var duplicate = new ShortenUrl("https://example.com/other", key, null);
++        assertThatThrownBy(() -> repository.create(duplicate))
++                .isInstanceOf(ShortenUrlKeyConflictException.class);
++
++        ShortenUrl saved = repository.findByKey(key).orElseThrow();
++        assertThat(saved.getOriginalUrl()).isEqualTo(ORIGINAL_URL);
++        assertThat(saved.getExpiresAt()).isEqualTo(expiresAt);
++        assertThat(saved.getRedirectCount()).isEqualTo(1L);
++    }
++
++    @Test
++    @DisplayName("만료 시각을 UTC로 저장하고 마이크로초까지 같은 Instant로 조회한다")
++    void persistsAndRestoresUtcExpiration(@Autowired JdbcTemplate jdbc) {
++        String key = "BcDe3456";
++        Instant expiresAt = Instant.parse("2030-12-31T23:59:59.123456Z");
++        repository.create(new ShortenUrl(ORIGINAL_URL, key, expiresAt));
++
++        LocalDateTime stored = jdbc.queryForObject(
++                "select expires_at from shorten_urls where shorten_url_key = ?",
++                LocalDateTime.class, key);
++
++        assertThat(stored).isEqualTo(LocalDateTime.ofInstant(expiresAt, ZoneOffset.UTC));
++        assertThat(repository.findByKey(key).orElseThrow().getExpiresAt()).isEqualTo(expiresAt);
++    }
++
++    @Test
++    @DisplayName("영구 링크는 다시 조회해도 만료 시각이 null이다")
++    void permanentLinkHasNoExpiration() {
++        String key = "CdEf4567";
++        repository.create(new ShortenUrl(ORIGINAL_URL, key, null));
++
++        assertThat(repository.findByKey(key).orElseThrow().getExpiresAt()).isNull();
++    }
++
++    @Test
++    @DisplayName("없는 키를 조회하면 빈 Optional을 반환한다")
++    void missingKeyReturnsEmpty() {
++        assertThat(repository.findByKey("DeFg5678")).isEmpty();
++    }
++
++    @Test
++    @DisplayName("조회 수는 지정한 링크만 호출 횟수만큼 증가한다")
++    void incrementsOnlyTheRequestedLink() {
++        String targetKey = "EfGh6789";
++        String otherKey = "FgHj7892";
++        repository.create(new ShortenUrl(ORIGINAL_URL, targetKey, null));
++        repository.create(new ShortenUrl(ORIGINAL_URL, otherKey, null));
++
++        repository.increaseRedirectCount(targetKey);
++        repository.increaseRedirectCount(targetKey);
++
++        assertThat(repository.findByKey(targetKey).orElseThrow().getRedirectCount()).isEqualTo(2L);
++        assertThat(repository.findByKey(otherKey).orElseThrow().getRedirectCount()).isZero();
++    }
++
++    @Test
++    @DisplayName("없는 키의 조회 수를 증가시키면 링크 없음 예외가 발생한다")
++    void incrementingMissingKeyThrowsNotFound() {
++        assertThatThrownBy(() -> repository.increaseRedirectCount("GhJk8923"))
++                .isInstanceOf(ShortenUrlNotFoundException.class);
++    }
++}
